@@ -1,0 +1,35 @@
+# --- Python ---
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+build/
+dist/
+.venv/
+venv/
+
+# --- Tooling caches ---
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.coverage
+coverage.xml
+htmlcov/
+
+# --- Data ---
+# The full CMS file (34 MB, 197,283 rows) is fetched by `make data` and never
+# committed. A stratified sample under data/sample/ IS committed so the test
+# suite and CI are hermetic and the demo cannot break on a dead download.
+data/raw/
+data/processed/
+*.parquet
+*.duckdb
+*.duckdb.wal
+
+# --- Model artifacts ---
+artifacts/
+
+# --- Editors / OS ---
+.idea/
+.vscode/
+.DS_Store

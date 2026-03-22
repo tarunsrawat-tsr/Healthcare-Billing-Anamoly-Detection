@@ -1,0 +1,169 @@
+"""Pydantic schemas for the claimsight API.
+
+Validation lives here rather than in handlers so that every constraint is
+declarative, appears in the generated OpenAPI spec, and is enforced before any
+query runs. Numeric fields carry explicit bounds: a negative charge or a
+zero-discharge row is not a scoring edge case, it is an invalid request, and
+saying so at the boundary is cheaper than defending against it downstream.
+"""
+
+from __future__ import annotations
+
+from typing import Literal
+
+from pydantic import BaseModel, ConfigDict, Field, field_validator
+
+#: A DRG definition string, e.g.
+#: ``"470 - MAJOR JOINT REPLACEMENT OR REATTACHMENT OF LOWER EXTREMITY W/O MCC"``.
+DrgStr = str
+
+
+class PeerLevelUsage(BaseModel):
+    """How many rows each rung of the peer hierarchy served."""
+
+    peer_level: str
+    rows_scored: int
+    pct_of_rows: float
+    smallest_group: int
+    median_group_size: float
+    largest_group: int
+
+
+class FlagReason(BaseModel):
+    reason: str
+    rows: int
+    pct: float
+
+
+class SummaryResponse(BaseModel):
+    rows_scored: int
+    flagged_peer: int
+    flagged_peer_pct: float
+    flagged_iforest: int
+    flagged_iforest_pct: float
+    flagged_both: int
+    flagged_both_pct: float
+    method_agreement_jaccard: float
+    degenerate_dispersion_rows: int
+    thin_dispersion_rows: int
+    median_confidence: float | None
+    max_robust_z: float | None
+    max_relative_excess: float | None
+    distinct_providers_flagged_peer: int
+    distinct_providers_flagged_both: int
+    flag_reasons: list[FlagReason]
+
+
+class OutlierRow(BaseModel):
+    provider_id: str
+    provider_name: str
+    city: str
+    state: str
+    drg: str
+    total_discharges: int
+    markup_ratio: float
+    peer_median: float
+    peer_n: int
+    peer_level: str
+    relative_excess: float
+    robust_z: float | None
+    confidence: float
+    flag_reason: str
+    flagged_both: bool
+
+
+class ProviderScorecard(BaseModel):
+    provider_id: str
+    provider_name: str
+    city: str
+    state: str
+    hrr: str
+    drgs_reported: int
+    total_discharges: int
+    flagged_claims: int
+    median_markup_ratio: float | None
+    median_confidence: float | None
+    max_relative_excess: float | None
+    claims: list[OutlierRow] = Field(
+        default_factory=list, description="highest-excess claims, most recent first"
+    )
+
+
+class ScoreRequest(BaseModel):
+    """A hypothetical claim to score against the loaded peer statistics.
+
+    This is the endpoint that justifies keeping pure-Python twins of the SQL
+    scoring maths: the batch pipeline scores 197k rows in DuckDB, but a single
+    ad-hoc "what if" request must produce an identical answer, and it does so
+    through :func:`claimsight.scoring.robust_z` and
+    :func:`claimsight.scoring.confidence`. ``tests/test_scoring.py`` pins the
+    twins to the SQL so the two paths cannot diverge.
+    """
+
+    #: The example below is a REAL row from the FY2016 file (a Texas hospital
+    #: billing DRG 470 in the Dallas HRR), not an invented one. ``POST /score``
+    #: scores hypothetical claims, so the values need not match a real row --
+    #: but the DRG and HRR must exist, or the reviewer clicking "Try it out" in
+    #: Swagger gets "no peer group found" as their first experience of the API.
+    #: ``tests/test_docs.py`` asserts the example resolves against the sample.
+    model_config = ConfigDict(extra="forbid", json_schema_extra={
+        "examples": [
+            {
+                "drg": "470 - MAJOR JOINT REPLACEMENT OR REATTACHMENT OF LOWER EXTREMITY W/O MCC",
+                "hrr": "TX - Dallas",
+                "state": "TX",
+                "total_discharges": 40,
+                "avg_covered_charges": 166219.63,
+                "avg_medicare_payments": 10849.75,
+            }
+        ]
+    })
+
+    drg: DrgStr = Field(min_length=1, max_length=200)
+    hrr: str = Field(min_length=1, max_length=200)
+    state: str = Field(min_length=2, max_length=2, description="Two-letter state code")
+    total_discharges: int = Field(gt=0, le=100_000)
+    avg_covered_charges: float = Field(gt=0, le=1e9)
+    avg_medicare_payments: float = Field(gt=0, le=1e9)
+
+    @field_validator("state")
+    @classmethod
+    def _upper_state(cls, value: str) -> str:
+        return value.strip().upper()
+
+    @field_validator("drg", "hrr")
+    @classmethod
+    def _collapse_whitespace(cls, value: str) -> str:
+        return " ".join(value.split())
+
+    @property
+    def markup_ratio(self) -> float:
+        return self.avg_covered_charges / self.avg_medicare_payments
+
+
+class ScoreVerdict(BaseModel):
+    """Result of scoring one hypothetical claim."""
+
+    markup_ratio: float
+    peer_found: bool
+    peer_level: str | None = None
+    peer_n: int | None = None
+    peer_median: float | None = None
+    peer_mad: float | None = None
+    relative_excess: float | None = None
+    robust_z: float | None = None
+    confidence: float | None = None
+    would_flag: bool = False
+    reason: str = Field(description="Human-readable explanation of the verdict")
+
+
+class HealthResponse(BaseModel):
+    status: Literal["ok"] = "ok"
+    version: str
+    rows_loaded: int
+    source_file: str
+    pipeline_seconds: float
+
+
+class ErrorResponse(BaseModel):
+    detail: str

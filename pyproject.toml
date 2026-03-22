@@ -1,0 +1,58 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "claimsight"
+version = "0.1.0"
+description = "Billing-anomaly detection over real CMS Medicare inpatient claims, built as a tested, containerised data service."
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+authors = [{ name = "Tarun Srawatt" }]
+keywords = ["medicare", "claims", "anomaly-detection", "duckdb", "fastapi", "mlops"]
+
+dependencies = [
+    "duckdb>=1.0",
+    "pandas>=2.0",
+    "numpy>=1.26",
+    "scikit-learn>=1.4",
+    "pydantic>=2.5",
+    "pydantic-settings>=2.1",
+    "fastapi>=0.110",
+    "uvicorn>=0.27",
+    "typer>=0.12",
+    "rich>=13.7",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+    "pytest-cov>=4.1",
+    "httpx>=0.27",
+    "ruff>=0.4",
+]
+
+[project.scripts]
+claimsight = "claimsight.cli:app"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q --strict-markers"
+filterwarnings = ["error::DeprecationWarning:claimsight.*"]
+
+[tool.coverage.run]
+source = ["claimsight"]
+branch = true
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM", "RUF"]
+ignore = ["B008"]  # typer idioms call functions in defaults
