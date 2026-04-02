@@ -88,12 +88,20 @@ class TestOpenApiExample:
         assert body["peer_median"] > 0
         assert body["confidence"] > 0
 
-    def test_example_produces_an_interesting_verdict(self, sample_client: TestClient) -> None:
-        """A demo example that flags nothing is a poor demo."""
+    def test_example_produces_a_flagged_verdict(self, sample_client: TestClient) -> None:
+        """A reviewer's first Swagger request must return something dramatic.
+
+        A real-but-unremarkable example once returned "within peer range" here:
+        correct, and a poor first impression. The documented example is now the
+        dataset's highest-excess claim, and this test keeps it that way.
+        """
         example = ScoreRequest.model_config["json_schema_extra"]["examples"][0]
         body = sample_client.post("/score", json=example).json()
+        assert body["would_flag"] is True, body
+        assert body["reason"].startswith("high_markup")
+        assert body["markup_ratio"] > 50          # 53062.36 / 953.09
+        assert body["relative_excess"] > 5        # ~7.5x the peer median
         assert body["markup_ratio"] > body["peer_median"]
-        assert body["relative_excess"] > 1.0
 
 
 class TestReadmeClaims:

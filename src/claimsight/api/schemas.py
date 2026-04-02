@@ -100,21 +100,27 @@ class ScoreRequest(BaseModel):
     twins to the SQL so the two paths cannot diverge.
     """
 
-    #: The example below is a REAL row from the FY2016 file (a Texas hospital
-    #: billing DRG 470 in the Dallas HRR), not an invented one. ``POST /score``
-    #: scores hypothetical claims, so the values need not match a real row --
-    #: but the DRG and HRR must exist, or the reviewer clicking "Try it out" in
-    #: Swagger gets "no peer group found" as their first experience of the API.
-    #: ``tests/test_docs.py`` asserts the example resolves against the sample.
+    #: The example below is a REAL row from the FY2016 file -- Denton Regional
+    #: Medical Center (TX) billing DRG 440 in the Dallas HRR -- and it is the
+    #: single highest-excess claim in the dataset: $53,062 charged against $953
+    #: of Medicare payment, a 55.7x markup where its 49 national peers median at
+    #: 7.5x.
+    #:
+    #: Chosen so that a reviewer clicking "Try it out" in Swagger gets a flagged
+    #: verdict with a dramatic, explainable number on their very first request.
+    #: An earlier example was a real but *unremarkable* DRG-470 row (markup 15.3
+    #: against a peer median of 14.5), which correctly returned "within peer
+    #: range" -- accurate, and a terrible demo. ``tests/test_docs.py`` asserts
+    #: both that the example resolves against the data and that it flags.
     model_config = ConfigDict(extra="forbid", json_schema_extra={
         "examples": [
             {
-                "drg": "470 - MAJOR JOINT REPLACEMENT OR REATTACHMENT OF LOWER EXTREMITY W/O MCC",
+                "drg": "440 - DISORDERS OF PANCREAS EXCEPT MALIGNANCY W/O CC/MCC",
                 "hrr": "TX - Dallas",
                 "state": "TX",
-                "total_discharges": 40,
-                "avg_covered_charges": 166219.63,
-                "avg_medicare_payments": 10849.75,
+                "total_discharges": 11,
+                "avg_covered_charges": 53062.36,
+                "avg_medicare_payments": 953.09,
             }
         ]
     })
