@@ -32,11 +32,20 @@ HTTP API.
   uncertainty is part of the output rather than hidden inside it.
 - **Two independent detectors, disagreement reported not smoothed over.**
   A robust peer z-score and an Isolation Forest. Their Jaccard overlap is
-  **0.047** — they mostly disagree, and [that turned out to be the most
-  interesting result in the project](#the-result-i-did-not-expect).
-- **Tested.** 94 tests, including hand-built fixtures that encode every dirty-data
-  trap in the source file, and a test asserting every branch of the flagging
-  `CASE` chain is reachable (after one was found to be dead code).
+  **0.023** — they mostly disagree, and [that turned out to be the most
+  interesting result in the project](#the-hypothesis-i-tested-and-lost).
+- **Every run is attributable.** `make save` writes a manifest (input SHA-256,
+  config, library versions, metrics, quantile profile) plus the flagged review
+  queue as Parquet. No model is pickled — [and proving that claim is what
+  exposed a real determinism bug](#reproducibility-and-the-bug-it-exposed).
+- **Drift is measured, not assumed.** `make drift` scores a new file and computes
+  the Population Stability Index of seven features against a stored baseline.
+  [Its first run caught a limitation of my own demo
+  dataset.](#drift-monitoring-and-what-it-caught-on-run-one)
+- **Tested.** 287 tests, including hand-built fixtures that encode every dirty-data
+  trap in the source file, a test asserting every branch of the flagging `CASE`
+  chain is reachable (after one was found to be dead code), and tests that assert
+  the documented API example resolves against real data.
 - **Reproducible data.** The full 34 MB file is fetched and *structurally
   validated* by `make data`; a seeded, stratified 24,370-row sample is committed
   so CI and the demo never depend on a network download.
@@ -61,6 +70,12 @@ HTTP API.
 - **Statistical *and* practical significance.** A 3.5σ deviation that amounts to
   billing 4% above peers is not worth a human's time. Flags must clear both a
   z-threshold and a `1.5×` peer-median effect-size floor.
+- **Case-mix normalisation, implemented and then reported honestly.** The forest
+  was fed DRG-normalised log-ratios on the hypothesis that it would agree more
+  with the peer z-score. Agreement went *down* (Jaccard 0.049 → 0.023). The
+  normalisation is still the default, because it is the version that catches the
+  one planted anomaly this project has ground truth for — [the full story is
+  here](#the-hypothesis-i-tested-and-lost).
 - **Degenerate cases are reported, not imputed.** 48 rows sit in peer groups with
   zero dispersion; they are marked `degenerate_peers` and excluded from flagging
   rather than being assigned a fabricated score.
@@ -73,10 +88,10 @@ HTTP API.
 
 ```bash
 make install-dev        # runtime + dev deps
-make test               # 94 tests, hermetic (uses the committed sample)
+make test               # 287 tests, hermetic (uses the committed sample)
 make report             # full pipeline -> anomaly report on stdout + JSON
 make fairness           # flag-rate audit across hospital size bands and states
-make serve              # FastAPI service on :8000  (/docs for OpenAPI)
+make serve              # API + dashboard on :8000  (/dashboard, /docs)
 ```
 
 `make report` works immediately against the committed 24k-row sample. For the
@@ -85,6 +100,14 @@ full dataset:
 ```bash
 make data               # fetches + validates the 34 MB CMS file (~1 min)
 make report             # now runs on all 197,283 rows
+```
+
+The operational loop — score a file, keep the receipt, check the next one against it:
+
+```bash
+make save               # score + write artifacts/runs/<run_id>/{manifest.json,outliers.parquet}
+make runs               # list saved runs (id, rows, flagged, source sha)
+make drift              # PSI of a new file against the latest baseline; exits non-zero on significant shift
 ```
 
 ---
@@ -211,26 +234,63 @@ strength on one compensate.
 | Detector | What it sees | Flagged | Rate |
 |---|---|---:|---:|
 | Peer robust z | billing vs. same-procedure peers | 4,207 | 2.13% |
-| Isolation Forest | multivariate raw features | 1,978 | 1.00% |
-| **Both agree** | | **276** | **0.14%** |
+| Isolation Forest | multivariate profile, DRG-normalised | 1,958 | 0.99% |
+| **Both agree** | | **136** | **0.07%** |
 
-Jaccard agreement: **0.047**.
+Jaccard agreement: **0.0226**.
 
-### The result I did not expect
+### The hypothesis I tested and lost
 
-The two methods barely overlap, and finding out why was the most valuable part of
-this project.
+The forest originally received **raw dollar magnitudes**, which made it a
+case-mix detector rather than a billing detector: a heart transplant at $3.1M is
+genuinely extreme in absolute terms and perfectly normal *for a heart transplant*.
+The peer z-score conditions on DRG, so it detects unusual **billing behaviour**.
 
-The Isolation Forest receives raw dollar magnitudes, so it is dominated by
-**case-mix**: a heart transplant at $3.1M is genuinely unusual in absolute terms
-but perfectly normal *for a heart transplant*. The peer z-score conditions on DRG,
-so it detects unusual **billing behaviour**. They are answering different
-questions, and a low overlap is the correct result — not a bug to tune away.
+So I predicted the obvious thing: normalise the forest's inputs against each DRG's
+national median and the two detectors will start agreeing, because both would then
+be asking about behaviour rather than about how expensive the procedure is.
 
-The identified fix is to feed the forest DRG-normalised features (ratios against
-the national DRG median) so case-mix stops confounding it, while keeping that
-computation independent of the peer median/MAD used by the z-score. That is
-tracked as the next iteration rather than quietly patched.
+I implemented it — log-ratios against the DRG's national median, computed with
+window functions in the same SQL pass so the normalisation stays independent of
+the peer hierarchy — and measured it on all 197,283 rows:
+
+| Forest features | Forest flags | Both agree | Jaccard | Median × peer among forest flags | Share of forest flags ≥ 1.5× |
+|---|---:|---:|---:|---:|---:|
+| raw magnitudes | 1,954 | 295 | **0.050** | 1.31× | 40.3% |
+| case-mix normalised | 1,958 | 136 | **0.023** | 0.96× | 20.4% |
+
+**The hypothesis was wrong.** Agreement did not rise; it halved.
+
+The reason is that normalisation does not remove the forest's reference frame, it
+*replaces* it. Raw features ask "is this billing extreme in absolute dollars?"
+Normalised features ask "is this hospital extreme for its DRG *nationally*?"
+Neither asks the peer z-score's question — "is this hospital extreme among the
+hospitals it actually competes with?" Moving the forest from an absolute frame to
+a national one moved it further from a *local* statistic, not closer.
+
+The evidence for that reading is in the table: the median forest-flagged row under
+normalisation bills **0.96× its peer median** — slightly *below* its local peers.
+Those are not broken rows. They are claims that are unusual nationally and
+unremarkable locally, which is a different and legitimate thing to surface. The
+top three are all Californian (UC Davis, Kaiser Redwood City, Kaiser San Jose):
+normalising against a *national* DRG median makes a systematically high-cost
+region look anomalous. That is a new confound, not the absence of one.
+
+**I kept the normalised features as the default anyway**, because of the one place
+in this project that has ground truth. `tests/fixtures/tiny_claims.csv` plants a
+30× outlier inside an 8-hospital peer group:
+
+| Forest features | Planted anomaly flagged? | Its percentile |
+|---|---|---:|
+| raw magnitudes | **no** | 0.941 — a near miss, under the contamination cut |
+| case-mix normalised | **yes** | 1.000 |
+
+So the honest summary is: these two detectors are **complementary, not
+redundant**; agreement between them is the wrong thing to optimise; and the choice
+of default is defended on the only labelled example available rather than on an
+argument about which features sound more principled. Both feature sets are
+exported (`RAW_MAGNITUDE_FEATURES`, `CASE_MIX_NORMALIZED_FEATURES`) and one config
+field apart, so the comparison is reproducible rather than a claim.
 
 ### A bug the guards were built to fix
 
@@ -268,6 +328,148 @@ version shipped a `CASE` chain in which `degenerate_peers` was shadowed by a
 
 ---
 
+## Running it as a system
+
+A pipeline that produces a report once is a script. What follows is what makes it
+operable: an HTTP surface, a receipt for every run, and a check on the next file
+that arrives.
+
+### API and dashboard
+
+`make serve` starts FastAPI on `:8000`. The pipeline runs **once at startup** (~8s
+for 197k rows) and every request is then a lookup against DuckDB views through a
+per-request cursor.
+
+| Endpoint | What it returns |
+|---|---|
+| `GET /dashboard` | self-contained HTML analytics dashboard |
+| `GET /health` | version, rows loaded, source file, pipeline seconds |
+| `GET /summary` | headline metrics + how often each guard fired |
+| `GET /peer-levels` | which rung of the hierarchy served how many rows |
+| `GET /outliers` | flagged claims ranked by practical significance (`?state=&min_excess=&agreed_only=`) |
+| `GET /providers/{id}` | one hospital's billing profile across every DRG it reported |
+| `GET /distribution` | server-side histogram of a whitelisted column, with flags per bucket |
+| `GET /reference` | distinct DRG / HRR / state strings, so clients can build valid requests |
+| `POST /score` | "would *this* claim be flagged?" — same SQL guards as the batch run |
+| `GET /docs` | OpenAPI / Swagger UI |
+
+Three details worth defending:
+
+- **`POST /score` does not reimplement the rules.** It evaluates the *same*
+  `flagged_expression()` / `reason_expression()` SQL the batch pipeline uses,
+  against a one-row inline relation. A second copy in Python would eventually
+  disagree with the first, and then the API would answer "would this be flagged?"
+  differently from the report that produced the numbers.
+- **The dashboard has no CDN, no webfont and no absolute URL.** One HTML file,
+  inline CSS and JS, hand-built SVG charts, every request a relative fetch. It
+  renders identically offline, in CI, in a container with no egress and behind a
+  reverse proxy, and needs no CORS configuration. `tests/test_dashboard.py`
+  asserts all of that against the file's text, so adding a
+  `<script src="https://…">` later fails the build.
+- **`/distribution` bins in DuckDB, and its column parameter is a whitelist.** The
+  column name is interpolated into SQL, so it is validated against a closed set
+  (anything else is a 422) rather than sanitised. Bucket counts are asserted to sum
+  exactly to the rows binned, and the flagged counts to sum to the summary's — a
+  histogram that quietly drops data is worse than no histogram.
+
+The documented `POST /score` example is the most extreme claim in the committed
+sample, so a reviewer's first request returns a flagged verdict with a dramatic,
+explainable number: **Denton Regional Medical Center (TX), DRG 440 — $53,062
+charged against $953 of Medicare payment.** A 55.7× markup, where its 31 Texas
+peers median at 9.15× → 6.09× peer excess, robust z 10.7. `tests/test_docs.py`
+asserts that the example parses, resolves to a real peer group, and flags. An
+earlier example was real but *unremarkable*, and correctly returned "within peer
+range" — accurate, and a terrible first impression.
+
+### Reproducibility, and the bug it exposed
+
+`make save` writes `artifacts/runs/<run_id>/`:
+
+- **`manifest.json`** — input path, size and **SHA-256**; the exact scoring config;
+  library versions (claimsight, Python, DuckDB, NumPy, scikit-learn); the ingest
+  report; peer-level usage; headline metrics; and a quantile profile per monitored
+  feature.
+- **`outliers.parquet`** — the flagged review queue, worst first, ZSTD-compressed.
+
+**No model is pickled.** The forest is seeded and the peer statistics are pure
+aggregates, so the manifest plus the committed data *is* the reproduction recipe; a
+pickled artifact would be a second source of truth that could silently disagree
+with the code that produced it. That is an argument, and arguments like that
+deserve to be tested rather than asserted:
+
+> Two runs of the same code on the same file disagreed by **37 forest flags**
+> (1,923 vs 1,960). The cause was not the seed: the fit subsample is drawn
+> *positionally* (`rng.choice` over row indices) from a view built out of joins and
+> window aggregates, and DuckDB does not guarantee a plan's output order across
+> runs or thread schedules. Different arrival order → different 50k subsample →
+> different forest.
+>
+> Fix: `ORDER BY` the unique claim key (`provider_id`, `drg`) before sampling —
+> about 0.1s on 197k rows. Three separate processes now produce bit-identical
+> scores (an MD5 over all 197,283 rounded score values agrees), and
+> `TestForestDeterminism` pins it by fitting the forest on the fixture with rows
+> arriving in reverse order and asserting identical output. Remove the `ORDER BY`
+> and that test fails.
+
+Without this, every number in the "raw vs normalised" comparison above would have
+been unfalsifiable — the run-to-run noise (±37 flags) is the same size as the
+effect being measured.
+
+### Drift monitoring, and what it caught on run one
+
+`make drift` scores a new file with the same config and computes the **Population
+Stability Index** of seven features against the baseline's stored quantile edges:
+
+```
+PSI = Σ (actualᵢ − expectedᵢ) · ln(actualᵢ / expectedᵢ)
+```
+
+PSI rather than a KS test because it is bucket-based and therefore explainable to a
+non-statistician ("the share of claims in the top charge decile doubled"), and
+rather than mean/variance comparison because billing distributions are heavily
+skewed — a mean can stay flat while the tail moves substantially, which is exactly
+the change that matters here. Bands are conventional (< 0.10 quiet, 0.10–0.25
+moderate, > 0.25 significant) and the command **exits non-zero on a significant
+shift**, so it can gate a scheduled job.
+
+Nothing is retrained automatically. The honest answer to "what do you do about
+drift?" is *tell a human, with a number attached*.
+
+The first real comparison was the committed 24,370-row sample against a full-file
+baseline, and it found something I had assumed was fine:
+
+| Feature | PSI | Band |
+|---|---:|---|
+| `relative_excess` | **0.133** | **moderate shift** |
+| `markup_ratio` | 0.063 | quiet |
+| `avg_covered_charges` | 0.017 | quiet |
+| `non_medicare_share` | 0.003 | quiet |
+| `avg_total_payments` | 0.0004 | quiet |
+| `total_discharges` | 0.0003 | quiet |
+
+The **raw inputs** are faithfully reproduced by the stratified sample. The
+**derived** statistic is not: the flag rate goes 2.13% on the full file → 3.63% on
+the sample, a 1.49 pp gap, because sampling thins the peer groups and a thinner
+peer group has a noisier median to be compared against. Two consequences, now
+documented rather than hidden:
+
+1. Numbers measured on the sample are not numbers about the dataset. Every figure
+   in this README is from the full 197,283-row file.
+2. A drift monitor earns its keep on the first run if it tells you something you
+   did not already know about your own data.
+
+Making PSI say "no change" when nothing changed took two fixes, both pinned by
+tests. Quantile edges **collapse on tied integer columns** — `total_discharges` has
+a median of 21 and a long left tail of 1s and 2s, so several deciles land on the
+same value and the surviving bins are not equal-sized; baseline proportions are
+therefore *measured* rather than assumed uniform. And edges are **rounded before
+the baseline is counted**, because rounding afterwards moves boundary values into a
+neighbouring bin and reports drift where nothing moved. Before both fixes, a file
+compared against itself scored PSI 0.0175 — small enough to look plausible, which
+is exactly what makes it dangerous.
+
+---
+
 ## Architecture
 
 ```
@@ -275,10 +477,16 @@ src/claimsight/
 ├── schema.py    # explicit column spec + two provably-agreeing parsers
 ├── ingest.py    # CSV -> typed DuckDB view, with a data-quality report
 ├── peers.py     # hierarchical peer groups + robust statistics
-├── scoring.py   # robust z, confidence, guards, Isolation Forest, summary
+├── scoring.py   # robust z, confidence, guards, case-mix normalisation, Isolation Forest
+├── registry.py  # run manifests, review-queue Parquet, run-to-run comparison
+├── monitor.py   # distribution profiles + PSI drift detection
 ├── config.py    # typed settings (pydantic-settings, env-overridable)
-├── cli.py       # ingest | peers | report | fairness
+├── cli.py       # ingest | peers | report | fairness | save | runs | drift
 └── api/         # FastAPI service
+    ├── main.py                 # routes; /score reuses the batch SQL guards
+    ├── deps.py                 # pipeline built once at startup, per-request cursors
+    ├── schemas.py              # pydantic contracts (extra="forbid")
+    └── static/dashboard.html   # the whole UI: one file, zero external requests
 scripts/
 ├── fetch_data.py    # download + structurally validate the CMS file
 └── make_sample.py   # rebuild the committed stratified sample (seeded)
@@ -308,6 +516,17 @@ a corrupt `N/A` money value that must be rejected rather than silently dropped.
 - **Checksums are the wrong validation.** Mirrors of the same dataset differ in
   line endings and row order, so `fetch_data.py` validates *structure* (header,
   197,283 rows, 573 DRGs) and reports the MD5 for information only.
+- **Manifests store quantile edges, not data.** A run's drift profile is ~9 numbers
+  per feature, which is enough to compute PSI against it months later without
+  retaining a 34 MB source file or a model blob.
+- **A run is identified by timestamp and content hash, not a mutable tag.** Tags get
+  moved; `20260916T195206Z` plus the input's SHA-256 cannot be.
+- **Cursor boundaries are tested, not assumed.** DuckDB's `con.register()` creates a
+  *connection-local* virtual table: a view over it works on the connection and 500s
+  on any `con.cursor()`. The API takes a cursor per request, so the forest's scores
+  are materialised into a real catalog table — and `TestCursorVisibility` crosses
+  that boundary over HTTP with the forest enabled, because the failure was invisible
+  to every test that stayed on one connection.
 
 ---
 
@@ -326,8 +545,14 @@ modest and accurate.
    4,043-discharge row. This is handled by an explicit confidence term rather
    than by discarding low-volume hospitals — but a discharge-weighted median is
    the better statistic and is not implemented.
-4. **Case-mix confounds the Isolation Forest.** Documented above with the
-   proposed fix; not yet fixed.
+4. **The Isolation Forest has no good reference frame.** Case-mix normalisation is
+   implemented and is the default, but as documented above it traded an
+   absolute-dollars confound for a regional-cost one — the top of the normalised
+   forest is three Californian hospitals, because their costs are high against a
+   *national* DRG median. Neither feature set asks the peer z-score's question.
+   This is a limitation of the second detector, and it is why the forest is
+   presented as a second opinion to read alongside the peer statistic rather than
+   as half of an ensemble vote.
 5. **Fairness risk is real and only partly measured.** `make fairness` reports
    flag rates by hospital volume band and state. Small and rural hospitals have
    thinner peer groups and noisier averages, so they are at genuine risk of
@@ -336,6 +561,17 @@ modest and accurate.
 6. **`markup_ratio` is a crude signal.** Charges are list prices, not payments,
    and hospital chargemasters vary wildly in how they relate to actual revenue.
    A production system would model payments, not charges.
+7. **The committed sample over-flags.** 3.63% on the sample vs 2.13% on the full
+   file (PSI 0.133 on `relative_excess`), because stratified sampling thins the
+   peer groups and a thin group has a noisier median. The sample is right for tests
+   and for exercising every code path; it is wrong for quoting numbers. Every
+   figure in this README is from the full 197,283-row file, and `make drift` is
+   what tells me so rather than my say-so.
+8. **Drift is detected, not handled.** PSI raises a number and a non-zero exit
+   code. There is no automatic re-baselining, no threshold adaptation and no
+   alerting integration — those need a decision about who is responsible for the
+   answer, which is an organisational question this project does not get to skip
+   past by writing code.
 
 ---
 
@@ -350,7 +586,27 @@ make docker-build && make docker-run
 
 Python ≥ 3.10. Core dependencies: DuckDB, pandas, NumPy, scikit-learn, FastAPI,
 Pydantic v2, Typer, Rich. **No GPU required** — the entire pipeline runs on 2 CPU
-cores in about 9 seconds.
+cores in about 8 seconds.
+
+**287 tests, ~1 min, hermetic** (no network, no full dataset, no GPU). They run
+against a hand-built 18-row fixture and pin the things that fail silently:
+
+| Suite | Tests | What it protects |
+|---|---:|---|
+| `test_schema` | 39 | both parsers (Python and DuckDB SQL) agree on the same `Column.expression()` objects |
+| `test_fetch_data` | 7 | `make data` detects archives by magic bytes, not URL suffix (a codeload URL ends in the branch name) |
+| `test_ingest` | 15 | dirty-data traps: `"$1,016,806.46"`, `"1,134"`, `010033`, corrupt `N/A` money rejected and counted |
+| `test_peers` | 12 | hierarchy fallback order and `min_support` behaviour |
+| `test_scoring` | 44 | every `flag_reason` branch reachable, dispersion fallback chain, Python twins of the SQL maths, forest determinism under reordered input |
+| `test_monitor` | 28 | PSI is 0 against its own profile (tied columns included), finite when a bin empties, bands, localisation |
+| `test_registry` | 26 | manifest provenance, review-queue contents and ordering, run comparison, byte-stable re-saves |
+| `test_api` | 34 | status codes, validation boundaries, `/score` agrees with the batch pipeline, everything works over HTTP **with the forest enabled** |
+| `test_cli` | 24 | commands print real numbers; `drift` exit codes 0 / 1 / 2 |
+| `test_dashboard` | 46 | the asset is self-contained, only calls routes that exist, and reads no field the API does not return |
+| `test_docs` | 12 | documented examples resolve against real data; the test counts quoted above match the live collection |
+
+Those counts are asserted against the live collection by `test_docs.py`, so a stale
+number here fails the build rather than quietly embarrassing anyone.
 
 ### Data provenance
 

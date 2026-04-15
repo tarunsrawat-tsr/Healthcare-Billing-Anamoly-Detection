@@ -164,3 +164,69 @@ class TestFixtureIntegrity:
         assert "02115" in text            # zero-padded ZIP
         assert "$1,016,806.46" in text    # currency-formatted money
         assert ",N/A" in text             # corrupt value that must be rejected
+
+
+class TestReadmeTestCounts:
+    """The README quotes test counts; a stale count is a small lie in a document
+    whose entire purpose is accuracy.
+
+    Collected with ``pytest --collect-only`` in a subprocess rather than counted by
+    hand or by AST: parametrised tests expand, so only the collector knows the real
+    number. If a future pytest changes its output format, these tests skip with the
+    unparsed text rather than passing vacuously or failing spuriously.
+    """
+
+    @pytest.fixture(scope="class")
+    def collected(self) -> dict[str, int]:
+        import subprocess
+        import sys
+
+        result = subprocess.run(
+            [sys.executable, "-m", "pytest", "--collect-only", "-q", "tests"],
+            capture_output=True,
+            text=True,
+            cwd=REPO_ROOT,
+            timeout=600,
+            check=False,
+        )
+        per_file = {
+            Path(match[0]).stem: int(match[1])
+            for match in re.findall(r"(tests/test_\w+\.py):\s*(\d+)", result.stdout)
+        }
+        if per_file:
+            return per_file
+        total = re.search(r"(\d+) tests? collected", result.stdout)
+        if total:
+            return {"__total__": int(total.group(1))}
+        pytest.skip(f"unrecognised --collect-only output: {result.stdout[-400:]!r}")
+
+    def _total(self, collected: dict[str, int]) -> int:
+        return collected.get("__total__") or sum(collected.values())
+
+    def test_headline_count_matches_the_suite(self, collected: dict[str, int]) -> None:
+        quoted = {int(n) for n in re.findall(r"(\d{2,4}) tests", README.read_text())}
+        assert quoted, "README quotes no test count at all"
+        assert quoted == {self._total(collected)}, (
+            f"README says {sorted(quoted)} tests; the suite collects {self._total(collected)}"
+        )
+
+    def test_per_suite_counts_match(self, collected: dict[str, int]) -> None:
+        if "__total__" in collected:
+            pytest.skip("collector reported only a total, not per-file counts")
+        rows = dict(re.findall(r"\| `(test_\w+)` \| (\d+) \|", README.read_text()))
+        assert rows, "README has no per-suite test table"
+        for suite, count in rows.items():
+            assert suite in collected, f"README lists {suite}, which does not exist"
+            assert int(count) == collected[suite], (
+                f"{suite}: README says {count}, collection says {collected[suite]}"
+            )
+
+    def test_every_suite_appears_in_the_readme(self, collected: dict[str, int]) -> None:
+        """Adding a test file without documenting it should fail, not slip through."""
+        if "__total__" in collected:
+            pytest.skip("collector reported only a total, not per-file counts")
+        documented = set(re.findall(r"\| `(test_\w+)` \| \d+ \|", README.read_text()))
+        assert documented == set(collected), (
+            f"undocumented: {sorted(set(collected) - documented)}; "
+            f"documented but missing: {sorted(documented - set(collected))}"
+        )

@@ -64,6 +64,29 @@ def _download(url: str, destination: Path, *, timeout: int = 600) -> None:
         shutil.copyfileobj(response, fh)
 
 
+def _detect_archive(path: Path) -> str:
+    """Identify a download by its magic bytes, not by its URL suffix.
+
+    Suffix detection is wrong for the GitHub mirror: codeload serves tarballs from
+    a URL that ends in the *branch name* --
+    ``.../tar.gz/refs/heads/master`` -- so ``url.endswith(".tar.gz")`` is False,
+    the gzip stream gets moved into place as the "CSV", and the failure surfaces
+    two layers later as ``UnicodeDecodeError: 0x8b at position 1`` (the second byte
+    of the gzip magic) while parsing a 337 MB binary as text. Sniffing four bytes
+    is both correct and cheap, and it also means a mirror that serves an HTML error
+    page with a 200 status is caught here rather than in the loader.
+    """
+    with path.open("rb") as handle:
+        head = handle.read(4)
+    if head.startswith(b"\x1f\x8b"):
+        return "tar.gz"
+    if head.startswith(b"PK\x03\x04"):
+        return "zip"
+    if not head:
+        raise ValueError("download is empty")
+    return "raw"
+
+
 def _extract_member(tarball: Path, member: str, destination: Path) -> None:
     import tarfile
 
@@ -117,18 +140,19 @@ def fetch(destination: Path, *, source_index: int | None = None) -> dict[str, ob
             staged = tmpdir / "download"
             try:
                 _download(url, staged)
-                if url.endswith((".zip", ".tar.gz", ".tgz")):
-                    if url.endswith(".zip"):
-                        import zipfile
+                kind = _detect_archive(staged)
+                print(f"  downloaded {staged.stat().st_size:,} bytes; detected {kind}", flush=True)
+                if kind == "zip":
+                    import zipfile
 
-                        with zipfile.ZipFile(staged) as archive:
-                            members = [m for m in archive.namelist() if m.endswith(".csv")]
-                            if not members:
-                                raise KeyError("no CSV inside the archive")
-                            with archive.open(members[0]) as src, destination.open("wb") as dst:
-                                shutil.copyfileobj(src, dst)
-                    else:
-                        _extract_member(staged, TARBALL_MEMBER, destination)
+                    with zipfile.ZipFile(staged) as archive:
+                        members = [m for m in archive.namelist() if m.endswith(".csv")]
+                        if not members:
+                            raise KeyError("no CSV inside the archive")
+                        with archive.open(members[0]) as src, destination.open("wb") as dst:
+                            shutil.copyfileobj(src, dst)
+                elif kind == "tar.gz":
+                    _extract_member(staged, TARBALL_MEMBER, destination)
                 else:
                     shutil.move(str(staged), str(destination))
 

@@ -41,10 +41,17 @@ jobs:
       - name: Test
         run: python -m pytest --cov=claimsight --cov-report=term-missing
 
+      # End-to-end smoke of the operational loop, not just the report: score the
+      # committed sample, persist a run, list it, then drift-check the same file
+      # against its own baseline (which must exit 0 with PSI ~ 0).
       - name: Smoke-test the CLI against the committed sample
         run: |
-          python -m claimsight.cli report data/sample/cms_inpatient_fy2016_sample.csv \
-            --no-forest --top 5
+          SAMPLE=data/sample/cms_inpatient_fy2016_sample.csv
+          python -m claimsight.cli report "$SAMPLE" --no-forest --top 5
+          python -m claimsight.cli report "$SAMPLE" --no-forest --save
+          python -m claimsight.cli runs
+          python -m claimsight.cli drift "$SAMPLE" --json artifacts/drift.json
+          test -f artifacts/drift.json
 
   api-contract:
     runs-on: ubuntu-latest
@@ -72,4 +79,18 @@ jobs:
           curl -sf http://127.0.0.1:8000/summary | head -c 400; echo
           curl -sf "http://127.0.0.1:8000/outliers?limit=3" | head -c 400; echo
           curl -sf http://127.0.0.1:8000/openapi.json -o /dev/null -w "openapi=%{http_code}\n"
+
+          # The dashboard must serve, and must not reach outside this origin.
+          curl -sf http://127.0.0.1:8000/dashboard -o /tmp/dash.html
+          grep -q "<title>claimsight" /tmp/dash.html
+          if grep -Eo "https?://[^\"' )]*" /tmp/dash.html | grep -v "www.w3.org/2000/svg"; then
+            echo "dashboard references an external URL"; exit 1
+          fi
+          echo "dashboard ok: $(wc -c < /tmp/dash.html) bytes, no external references"
+
+          curl -sf "http://127.0.0.1:8000/distribution?column=markup_ratio&bins=20" | head -c 200; echo
+          curl -sf http://127.0.0.1:8000/reference -o /dev/null -w "reference=%{http_code}\n"
+          # The column parameter is a whitelist interpolated into SQL.
+          curl -s -o /dev/null -w "bad-column=%{http_code}\n" \
+            "http://127.0.0.1:8000/distribution?column=provider_name" | grep -q "422"
           kill $SERVER

@@ -18,13 +18,14 @@ copy would eventually disagree with the first -- and then the API would answer
 from __future__ import annotations
 
 import logging
+import math
 from contextlib import asynccontextmanager
 from pathlib import Path
-from typing import Annotated, Any
+from typing import Annotated, Any, Literal
 
 import duckdb
 from fastapi import Depends, FastAPI, HTTPException, Query, Request
-from fastapi.responses import JSONResponse
+from fastapi.responses import HTMLResponse, JSONResponse
 
 from .. import __version__
 from ..peers import peer_level_summary
@@ -44,11 +45,14 @@ from ..scoring import (
 )
 from .deps import FINAL_VIEW, Pipeline, build_pipeline
 from .schemas import (
+    DistributionBin,
+    DistributionResponse,
     ErrorResponse,
     HealthResponse,
     OutlierRow,
     PeerLevelUsage,
     ProviderScorecard,
+    ReferenceData,
     ScoreRequest,
     ScoreVerdict,
     SummaryResponse,
@@ -90,6 +94,44 @@ def _round(value: float | None, digits: int = RESPONSE_PRECISION) -> float | Non
     return round(float(value), digits) if value is not None else None
 
 
+#: Numeric columns ``GET /distribution`` will bin, and whether a log transform
+#: makes sense for each. This is a closed whitelist on purpose: the column name
+#: is interpolated into SQL, so it must never be attacker-supplied free text.
+#: FastAPI validates the query parameter against it and returns 422 otherwise.
+HISTOGRAM_COLUMNS: dict[str, bool] = {
+    "markup_ratio": True,
+    "avg_covered_charges": True,
+    "avg_total_payments": True,
+    "avg_medicare_payments": True,
+    "total_discharges": False,
+    "relative_excess": True,
+    "robust_z": False,
+    "confidence": False,
+    "non_medicare_share": False,
+}
+
+HistogramColumn = Literal[tuple(HISTOGRAM_COLUMNS)]  # type: ignore[valid-type]
+
+#: Column order for every claim row the API returns. One list, shared by
+#: ``/outliers`` and ``/providers/{id}``, bound positionally to the SELECT above.
+#: Kept as a module constant because the two endpoints used to carry separate
+#: copies and a field added to one silently mis-aligned the other.
+OUTLIER_COLUMNS: tuple[str, ...] = (
+    "provider_id", "provider_name", "city", "state", "drg", "total_discharges",
+    "avg_covered_charges", "avg_medicare_payments",
+    "markup_ratio", "peer_median", "peer_n", "peer_level", "relative_excess",
+    "robust_z", "confidence", "flag_reason", "flagged_peer", "flagged_both",
+)
+
+#: Where the dashboard asset lives inside the package.
+DASHBOARD_HTML = Path(__file__).parent / "static" / "dashboard.html"
+
+
+def _identity(value: float) -> float:
+    """Inverse of no transform. Named rather than a lambda so the call site reads."""
+    return value
+
+
 def create_app(
     *,
     source: Path | None = None,
@@ -129,14 +171,23 @@ def create_app(
         logger.exception("duckdb error: %s", exc)
         return JSONResponse(status_code=500, content={"detail": "internal query failure"})
 
-    @application.get("/", tags=["service"])
-    def root(pipeline: PipelineDep) -> dict[str, Any]:
+    @application.get("/", tags=["service"], response_model=None)
+    def root(request: Request, pipeline: PipelineDep) -> Any:
         """Landing page. A reviewer opening the base URL should not get a 404.
 
-        Lists the real endpoints and repeats the not-a-fraud-finding caveat,
-        because the root of a public API is the most likely thing to be read
-        without the README open.
+        Content-negotiated: a browser (``Accept: text/html``) gets the dashboard,
+        an API client gets the JSON service index. Without this, the most likely
+        first URL anyone opens -- the root of a preview or a deployed service --
+        shows a wall of JSON, and the actual interface is one path away that they
+        have to know to type. ``curl`` and HTTP clients default to ``*/*`` and
+        still get JSON, so the API contract is unchanged for anything programmatic.
+
+        The JSON branch lists the real endpoints and repeats the
+        not-a-fraud-finding caveat, because the root of a public API is the most
+        likely thing to be read without the README open.
         """
+        if "text/html" in request.headers.get("accept", ""):
+            return dashboard()
         return {
             "service": "claimsight",
             "version": __version__,
@@ -155,6 +206,9 @@ def create_app(
                                  "(?limit=&state=&min_excess=&agreed_only=)",
                 "GET /providers/{provider_id}": "one hospital's billing profile",
                 "POST /score": "score a hypothetical claim against loaded peers",
+                "GET /distribution": "server-side histogram of one column, with flags per bucket",
+                "GET /reference": "distinct DRG / HRR / state values in the loaded dataset",
+                "GET /dashboard": "self-contained HTML analytics dashboard",
                 "GET /docs": "interactive OpenAPI / Swagger UI",
             },
         }
@@ -218,8 +272,9 @@ def create_app(
 
         sql = f"""
             SELECT provider_id, provider_name, city, state, drg, total_discharges,
+                   avg_covered_charges, avg_medicare_payments,
                    markup_ratio, peer_median, peer_n, peer_level, relative_excess,
-                   robust_z, confidence, flag_reason, flagged_both
+                   robust_z, confidence, flag_reason, flagged_peer, flagged_both
             FROM {FINAL_VIEW}
             WHERE {' AND '.join(predicates)}
             ORDER BY relative_excess DESC
@@ -227,11 +282,7 @@ def create_app(
         """
         params.append(limit)
         rows = cursor.execute(sql, params).fetchall()
-        columns = [
-            "provider_id", "provider_name", "city", "state", "drg", "total_discharges",
-            "markup_ratio", "peer_median", "peer_n", "peer_level", "relative_excess",
-            "robust_z", "confidence", "flag_reason", "flagged_both",
-        ]
+        columns = OUTLIER_COLUMNS
         return [dict(zip(columns, row, strict=True)) for row in rows]
 
     @application.get(
@@ -268,18 +319,15 @@ def create_app(
         claims = cursor.execute(
             f"""
             SELECT provider_id, provider_name, city, state, drg, total_discharges,
+                   avg_covered_charges, avg_medicare_payments,
                    markup_ratio, peer_median, peer_n, peer_level, relative_excess,
-                   robust_z, confidence, flag_reason, flagged_both
+                   robust_z, confidence, flag_reason, flagged_peer, flagged_both
             FROM {FINAL_VIEW} WHERE provider_id = ?
             ORDER BY relative_excess DESC NULLS LAST LIMIT ?
             """,
             [provider_id, limit],
         ).fetchall()
-        columns = [
-            "provider_id", "provider_name", "city", "state", "drg", "total_discharges",
-            "markup_ratio", "peer_median", "peer_n", "peer_level", "relative_excess",
-            "robust_z", "confidence", "flag_reason", "flagged_both",
-        ]
+        columns = OUTLIER_COLUMNS
         payload = {
             "provider_id": head[0],
             "provider_name": head[1],
@@ -399,6 +447,186 @@ def create_app(
             would_flag=bool(verdict[0]),
             reason=f"{reason_code}: {detail}",
         )
+
+
+    @application.get(
+        "/distribution",
+        response_model=DistributionResponse,
+        responses={422: {"model": ErrorResponse}},
+        tags=["analysis"],
+    )
+    def distribution(
+        pipeline: PipelineDep,
+        column: Annotated[
+            HistogramColumn,
+            Query(description="numeric column to bin (closed whitelist)"),
+        ] = "markup_ratio",
+        bins: Annotated[int, Query(ge=5, le=100)] = 40,
+        log: Annotated[
+            bool,
+            Query(description="bin on a natural-log scale; ignored for columns where "
+                  "it is not meaningful"),
+        ] = True,
+    ) -> dict[str, Any]:
+        """Histogram of one column, with the flagged count per bucket.
+
+        Billing data spans three orders of magnitude, so a linear histogram of
+        charges is one tall bar and a long invisible tail. ``log=true`` bins on
+        a log scale, which is what makes the tail -- the part the scorer is
+        actually about -- visible. The flagged count per bucket shows *where* in
+        the distribution the flags concentrate rather than just how many.
+
+        The column name is validated against :data:`HISTOGRAM_COLUMNS` before it
+        reaches any SQL.
+        """
+        use_log = log and HISTOGRAM_COLUMNS[column]
+        cursor = pipeline.cursor()
+        expr = f'ln("{column}")' if use_log else f'"{column}"'
+        # A log transform is undefined at <= 0; those rows are excluded and the
+        # exclusion is reported rather than silently shrinking the chart.
+        guard = f'"{column}" > 0' if use_log else f'"{column}" IS NOT NULL'
+
+        stats = cursor.execute(
+            f"""
+            SELECT count(*)                        AS rows_total,
+                   sum(CASE WHEN {guard} THEN 1 ELSE 0 END) AS rows_binned,
+                   min("{column}")                  AS min,
+                   max("{column}")                  AS max,
+                   median("{column}")               AS median,
+                   avg("{column}")                  AS mean,
+                   quantile_cont("{column}", 0.95)  AS p95,
+                   quantile_cont("{column}", 0.99)  AS p99
+            FROM {FINAL_VIEW}
+            WHERE "{column}" IS NOT NULL
+            """
+        ).fetchone()
+        rows_total, rows_binned = int(stats[0]), int(stats[1] or 0)
+        if rows_binned == 0:
+            return {
+                "column": column,
+                "transform": "log" if use_log else "identity",
+                "bins": bins,
+                "rows_total": rows_total,
+                "rows_binned": 0,
+                "buckets": [],
+                "note": "no positive values to bin",
+            }
+
+        bounds = cursor.execute(
+            f"SELECT min({expr}) AS lo, max({expr}) AS hi FROM {FINAL_VIEW} WHERE {guard}"
+        ).fetchone()
+        lo, hi = float(bounds[0]), float(bounds[1])
+        note = None
+        if hi <= lo:
+            # Every value is identical. width_bucket would divide by zero, so
+            # widen the range by one unit and say so.
+            hi = lo + 1.0
+            note = "all values are identical; the single populated bucket spans an artificial range"
+
+        # DuckDB has no width_bucket() -- that is Postgres. Bucket arithmetic is
+        # explicit instead: floor((x - lo) / step) + 1, clamped to [1, bins] so
+        # the maximum value (which lands exactly on the top edge) stays inside
+        # the last bucket rather than falling off the end.
+        step = (hi - lo) / bins
+        bucket_rows = cursor.execute(
+            f"""
+            WITH values AS (
+                SELECT {expr} AS x, flagged_peer
+                FROM {FINAL_VIEW}
+                WHERE {guard}
+            ),
+            bucketed AS (
+                SELECT least(greatest(floor((x - ?) / ?) + 1, 1), ?)::INTEGER AS k,
+                       flagged_peer
+                FROM values
+            )
+            SELECT k,
+                   count(*) AS n,
+                   sum(CASE WHEN flagged_peer THEN 1 ELSE 0 END) AS flagged
+            FROM bucketed GROUP BY k ORDER BY k
+            """,
+            [lo, step, bins],
+        ).fetchall()
+
+        by_index = {int(k): (int(n), int(f)) for k, n, f in bucket_rows}
+        invert = math.exp if use_log else _identity
+        buckets = [
+            DistributionBin(
+                index=i + 1,
+                lo=round(invert(lo + i * step), RESPONSE_PRECISION),
+                hi=round(invert(lo + (i + 1) * step), RESPONSE_PRECISION),
+                count=by_index.get(i + 1, (0, 0))[0],
+                flagged=by_index.get(i + 1, (0, 0))[1],
+            )
+            for i in range(bins)
+        ]
+        if use_log and rows_binned < rows_total:
+            note = (
+                f"{rows_total - rows_binned:,} non-positive row(s) excluded by the log transform"
+            )
+
+        return {
+            "column": column,
+            "transform": "log" if use_log else "identity",
+            "bins": bins,
+            "rows_total": rows_total,
+            "rows_binned": rows_binned,
+            "min": _round(stats[2]),
+            "max": _round(stats[3]),
+            "median": _round(stats[4]),
+            "mean": _round(stats[5]),
+            "p95": _round(stats[6]),
+            "p99": _round(stats[7]),
+            "buckets": buckets,
+            "note": note,
+        }
+
+
+    @application.get("/reference", response_model=ReferenceData, tags=["analysis"])
+    def reference(pipeline: PipelineDep) -> dict[str, Any]:
+        """Every distinct DRG, HRR and state present in the loaded dataset.
+
+        Returned as one payload rather than three endpoints because the only
+        consumer needs all three at once to render a form, and three round trips
+        on page load would be three chances to be slow.
+        """
+        cursor = pipeline.cursor()
+        drgs = [r[0] for r in cursor.execute(
+            f"SELECT DISTINCT drg FROM {FINAL_VIEW} WHERE drg IS NOT NULL ORDER BY drg"
+        ).fetchall()]
+        hrrs = [r[0] for r in cursor.execute(
+            f"SELECT DISTINCT hrr FROM {FINAL_VIEW} WHERE hrr IS NOT NULL ORDER BY hrr"
+        ).fetchall()]
+        states = [r[0] for r in cursor.execute(
+            f"SELECT DISTINCT state FROM {FINAL_VIEW} WHERE state IS NOT NULL ORDER BY state"
+        ).fetchall()]
+        return {
+            "drgs": drgs,
+            "hrrs": hrrs,
+            "states": states,
+            "drg_count": len(drgs),
+            "hrr_count": len(hrrs),
+            "state_count": len(states),
+        }
+
+    @application.get("/dashboard", response_class=HTMLResponse, tags=["service"])
+    def dashboard() -> HTMLResponse:
+        """Self-contained analytics dashboard.
+
+        One HTML file with inline CSS and JS and **no CDN dependencies**, so it
+        renders identically offline, in CI, in a container with no egress, and
+        behind a reverse proxy. Every request it makes is a relative fetch to
+        this same service, which means it needs no CORS configuration and no
+        knowledge of the host it is served from.
+
+        Read from disk per request rather than cached at import: the file is
+        ~40 KB and this makes dashboard edits visible on refresh.
+        """
+        if not DASHBOARD_HTML.is_file():  # pragma: no cover - packaging guard
+            raise HTTPException(
+                status_code=503, detail=f"dashboard asset missing: {DASHBOARD_HTML}"
+            )
+        return HTMLResponse(DASHBOARD_HTML.read_text(encoding="utf-8"))
 
     return application
 

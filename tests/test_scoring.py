@@ -18,11 +18,14 @@ from tests.conftest import (
     DRG_B_UNIFORM,
     DRG_C_SINGLETON,
     OUTLIER_PROVIDER,
+    TINY_CLAIMS,
 )
 
 from claimsight.scoring import (
+    CASE_MIX_NORMALIZED_FEATURES,
     CLAIM_KEY,
     MAD_SCALE,
+    RAW_MAGNITUDE_FEATURES,
     ScoringConfig,
     add_isolation_forest,
     confidence,
@@ -32,6 +35,7 @@ from claimsight.scoring import (
 )
 
 VIEW = "claim_scores_flagged"
+FINAL_VIEW = "claim_scores_final"
 
 
 def _row(con, provider_id: str) -> dict:
@@ -225,10 +229,12 @@ class TestSummarise:
         assert summary["rows_scored"] == 17
         assert summary["flagged_peer"] == 1  # only the planted outlier
         assert summary["distinct_providers_flagged_peer"] == 1
-        # The forest's contamination rate on 17 rows flags nothing, so the
-        # intersection is empty -- which is exactly why the two counts are
-        # reported separately rather than as one ambiguous "flagged" number.
-        assert summary["distinct_providers_flagged_both"] == 0
+        # With case-mix-normalised features the forest DOES catch the planted
+        # anomaly, so both methods agree on it. See TestCaseMixNormalization --
+        # under the original raw-magnitude features this was 0, because the
+        # forest missed the one row whose anomaly is actually known.
+        assert summary["flagged_both"] == 1
+        assert summary["distinct_providers_flagged_both"] == 1
         assert summary["degenerate_dispersion_rows"] == 9  # 8 uniform + 1 singleton
         # Jaccard must be a valid overlap ratio.
         assert 0.0 <= summary["method_agreement_jaccard"] <= 1.0
@@ -409,3 +415,173 @@ class TestCursorVisibility:
         ).fetchone()
         assert row[0] == 17
         assert row[1] == 17
+
+
+def _fresh_pipeline(features):
+    """Build a pipeline on the fixture with a chosen forest feature set."""
+    import duckdb
+
+    from claimsight.ingest import load_claims
+    from claimsight.peers import build_peer_stats
+
+    con = duckdb.connect()
+    load_claims(TINY_CLAIMS, con)
+    build_peer_stats(con)
+    cfg = ScoringConfig(iforest_features=features)
+    score_claims(con, cfg)
+    add_isolation_forest(con, cfg)
+    return con, cfg
+
+
+class TestCaseMixNormalization:
+    """The one place in this project with actual ground truth.
+
+    ``tiny_claims.csv`` has a deliberately planted anomaly: provider 010040
+    bills a 30x markup where its 7 peers sit between 4.2x and 6.0x. Everywhere
+    else the dataset has no labels, so this fixture is the only test that can
+    ask "did the detector find the thing we know is there?"
+
+    The result refuted the original hypothesis. Case-mix normalisation was
+    introduced on the theory that the Isolation Forest was dominated by
+    procedure mix and would agree more with the peer z-score once normalised.
+    On the full file agreement actually *fell* (Jaccard 0.049 -> 0.023). What
+    normalisation really did was change the forest's reference frame from local
+    peers to national DRG -- a different question, not a better-answered one.
+
+    But on this fixture, where the answer is known, the normalised forest catches
+    the planted anomaly and the raw-magnitude forest misses it. That is real
+    validation, and it is why the normalised set is the default.
+    """
+
+    def test_raw_magnitude_features_miss_the_planted_anomaly(self) -> None:
+        con, _ = _fresh_pipeline(RAW_MAGNITUDE_FEATURES)
+        flagged, percentile = con.sql(
+            f"""SELECT iforest_flag, iforest_percentile FROM {FINAL_VIEW}
+                WHERE provider_id = '{OUTLIER_PROVIDER}'"""
+        ).fetchone()
+        assert flagged is False
+        # It ranked high, just under the contamination cutoff -- a near miss.
+        assert percentile > 0.9
+
+    def test_normalised_features_catch_the_planted_anomaly(self) -> None:
+        con, _ = _fresh_pipeline(CASE_MIX_NORMALIZED_FEATURES)
+        flagged, percentile = con.sql(
+            f"""SELECT iforest_flag, iforest_percentile FROM {FINAL_VIEW}
+                WHERE provider_id = '{OUTLIER_PROVIDER}'"""
+        ).fetchone()
+        assert flagged is True
+        assert percentile == pytest.approx(1.0)
+
+    def test_normalised_columns_exist_and_are_finite(self) -> None:
+        """Log-ratios must not produce inf/NaN on a $0 payment."""
+        con, _ = _fresh_pipeline(CASE_MIX_NORMALIZED_FEATURES)
+        row = con.sql(
+            f"""SELECT count(*) AS n,
+                       sum(CASE WHEN isfinite(charges_vs_drg) THEN 0 ELSE 1 END) AS bad_ch,
+                       sum(CASE WHEN isfinite(markup_vs_drg) THEN 0 ELSE 1 END)  AS bad_mk,
+                       sum(CASE WHEN abs(markup_vs_drg) > 50 THEN 1 ELSE 0 END)  AS absurd
+                FROM {VIEW}"""
+        ).fetchone()
+        assert row[0] == 17
+        assert row[1] == 0, "non-finite charges_vs_drg"
+        assert row[2] == 0, "non-finite markup_vs_drg"
+        assert row[3] == 0, "log-ratio exploded; the 1e-9 guard is not working"
+
+    def test_drg_normalization_partitions_by_drg_only(self) -> None:
+        """The normalisation must ignore HRR/state, or it stops being independent
+        of the peer hierarchy."""
+        con, _ = _fresh_pipeline(CASE_MIX_NORMALIZED_FEATURES)
+        rows = con.sql(
+            f"""SELECT drg, count(DISTINCT drg_med_markup) AS distinct_medians
+                FROM {VIEW} GROUP BY 1"""
+        ).fetchall()
+        # Exactly one national median per DRG, regardless of how many HRRs it spans.
+        assert all(r[1] == 1 for r in rows), rows
+
+    def test_both_feature_sets_are_available_for_comparison(self) -> None:
+        """The README's raw-vs-normalised numbers must stay reproducible."""
+        assert RAW_MAGNITUDE_FEATURES != CASE_MIX_NORMALIZED_FEATURES
+        assert ScoringConfig().iforest_features == CASE_MIX_NORMALIZED_FEATURES
+
+
+def _forest_run(*, shuffle: bool, cfg: ScoringConfig) -> tuple[list, str]:
+    """Fit the forest on the fixture, optionally with the rows arriving reversed.
+
+    Returns the scored rows (in a canonical order) plus the provider_id the
+    forest actually saw first, so a test can prove the shuffle was not a no-op.
+    """
+    import duckdb
+
+    from claimsight.ingest import load_claims
+    from claimsight.peers import build_peer_stats
+
+    con = duckdb.connect()
+    load_claims(TINY_CLAIMS, con)
+    build_peer_stats(con)
+    score_claims(con, cfg)
+    if shuffle:
+        con.execute(
+            f"""
+            CREATE TABLE reversed_arrival AS
+            SELECT * FROM {VIEW} ORDER BY provider_id DESC, drg DESC
+            """
+        )
+        con.execute(f"CREATE OR REPLACE VIEW {VIEW} AS SELECT * FROM reversed_arrival")
+    # What the forest reads, in arrival order, before it sorts anything.
+    first_arrival = con.sql(f"SELECT provider_id FROM {VIEW} LIMIT 1").fetchone()[0]
+    add_isolation_forest(con, cfg)
+    rows = con.sql(
+        f"""
+        SELECT provider_id, drg, iforest_flag,
+               round(iforest_score, 9)      AS score,
+               round(iforest_percentile, 9) AS pct
+        FROM {FINAL_VIEW} ORDER BY provider_id, drg
+        """
+    ).fetchall()
+    return rows, first_arrival
+
+
+class TestForestDeterminism:
+    """The forest must not depend on the order rows happen to arrive in.
+
+    ``add_isolation_forest`` draws its fit subsample *positionally*
+    (``rng.choice(len(x), size=...)``), so if the relation's row order varies,
+    the fitted forest varies. On the full FY2016 file this was not theoretical:
+    two runs of the same code on the same file disagreed by 37 flags (1,923 vs
+    1,960) because the scored view's join/window output order is not guaranteed.
+    The fix is an ``ORDER BY`` on the unique claim key before sampling; these
+    tests pin it, with a sample size small enough that the subsample is
+    genuinely exercised on a 17-row fixture.
+    """
+
+    CFG = ScoringConfig(
+        iforest_sample_size=5,  # < 17 rows, so the positional subsample runs
+        iforest_estimators=25,
+        iforest_contamination=0.2,  # high enough that some rows actually flag
+    )
+
+    def test_the_test_is_not_vacuous(self) -> None:
+        rows = _forest_run(shuffle=False, cfg=self.CFG)[0]
+        assert self.CFG.iforest_sample_size < len(rows)
+        assert any(r[2] for r in rows), "no flags at all: the assertion below proves nothing"
+
+    def test_row_arrival_order_does_not_change_the_forest(self) -> None:
+        natural, first_natural = _forest_run(shuffle=False, cfg=self.CFG)
+        reversed_, first_reversed = _forest_run(shuffle=True, cfg=self.CFG)
+        # The shuffle really did reorder what the forest read...
+        assert first_natural != first_reversed
+        # ...and it changed nothing about the result.
+        assert natural == reversed_
+
+    def test_repeated_runs_are_identical(self) -> None:
+        """Catches nondeterminism from the seed, n_jobs or the percentile ranking."""
+        first = _forest_run(shuffle=False, cfg=self.CFG)[0]
+        second = _forest_run(shuffle=False, cfg=self.CFG)[0]
+        assert first == second
+
+    def test_flag_counts_are_stable(self) -> None:
+        counts = {
+            sum(1 for r in _forest_run(shuffle=s, cfg=self.CFG)[0] if r[2])
+            for s in (False, True, False)
+        }
+        assert len(counts) == 1, counts

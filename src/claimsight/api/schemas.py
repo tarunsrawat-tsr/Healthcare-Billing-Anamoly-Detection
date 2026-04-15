@@ -61,6 +61,10 @@ class OutlierRow(BaseModel):
     state: str
     drg: str
     total_discharges: int
+    #: Raw dollars, not just the ratio: "$53,062 charged against $953 paid" is
+    #: the sentence a reviewer needs, and it cannot be recovered from the ratio.
+    avg_covered_charges: float
+    avg_medicare_payments: float
     markup_ratio: float
     peer_median: float
     peer_n: int
@@ -69,6 +73,9 @@ class OutlierRow(BaseModel):
     robust_z: float | None
     confidence: float
     flag_reason: str
+    #: Present because a provider scorecard mixes flagged and unflagged claims;
+    #: in ``GET /outliers`` it is always true by construction.
+    flagged_peer: bool = True
     flagged_both: bool
 
 
@@ -101,10 +108,15 @@ class ScoreRequest(BaseModel):
     """
 
     #: The example below is a REAL row from the FY2016 file -- Denton Regional
-    #: Medical Center (TX) billing DRG 440 in the Dallas HRR -- and it is the
-    #: single highest-excess claim in the dataset: $53,062 charged against $953
-    #: of Medicare payment, a 55.7x markup where its 49 national peers median at
-    #: 7.5x.
+    #: Medical Center (TX) billing DRG 440 in the Dallas HRR: $53,062 charged
+    #: against $953 of Medicare payment, a 55.7x markup.
+    #:
+    #: It is the highest-excess claim in the *committed 24,370-row sample*
+    #: (6.09x..7.46x its peer median depending on which file is loaded: the
+    #: sample's thinner Texas peer group resolves to the national rung with 49
+    #: peers at a 7.5x median, the full file's to drg_state with 31 peers at
+    #: 9.15x). On the full 197,283-row file it ranks 8th. Either way it flags,
+    #: which is the property that matters here.
     #:
     #: Chosen so that a reviewer clicking "Try it out" in Swagger gets a flagged
     #: verdict with a dramatic, explainable number on their very first request.
@@ -169,6 +181,60 @@ class HealthResponse(BaseModel):
     rows_loaded: int
     source_file: str
     pipeline_seconds: float
+
+
+class DistributionBin(BaseModel):
+    """One histogram bucket, in the column's own units."""
+
+    index: int = Field(description="1-based bucket position")
+    lo: float = Field(description="Lower edge, transformed back to original units")
+    hi: float = Field(description="Upper edge, transformed back to original units")
+    count: int
+    flagged: int = Field(description="Rows in this bucket that the peer scorer flagged")
+
+
+class DistributionResponse(BaseModel):
+    """Server-side histogram of one whitelisted numeric column.
+
+    Binning happens in DuckDB rather than shipping 197k values to the browser:
+    the payload is ~40 numbers either way, and the server already has the data
+    in a columnar engine that can compute it in milliseconds.
+    """
+
+    column: str
+    transform: Literal["log", "identity"]
+    bins: int
+    rows_total: int = Field(description="Non-null rows for this column")
+    rows_binned: int = Field(
+        description="Rows actually placed in buckets; fewer than rows_total when "
+        "a log transform excluded non-positive values"
+    )
+    min: float | None = None
+    max: float | None = None
+    median: float | None = None
+    mean: float | None = None
+    p95: float | None = None
+    p99: float | None = None
+    buckets: list[DistributionBin]
+    note: str | None = Field(
+        default=None, description="Anything the reader must know to interpret the chart"
+    )
+
+
+class ReferenceData(BaseModel):
+    """Distinct dimension values, so a client can build valid requests.
+
+    A DRG definition string is ~70 characters and must match the dataset
+    exactly; asking a human to type one is asking for a 404. This is what lets
+    the dashboard offer a picker instead of a text box.
+    """
+
+    drgs: list[str]
+    hrrs: list[str]
+    states: list[str]
+    drg_count: int
+    hrr_count: int
+    state_count: int
 
 
 class ErrorResponse(BaseModel):

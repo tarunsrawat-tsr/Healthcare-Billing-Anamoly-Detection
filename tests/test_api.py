@@ -227,3 +227,35 @@ class TestScoreEndpoint:
     def test_state_is_normalised_to_uppercase(self, client: TestClient) -> None:
         body = client.post("/score", json={**self.PAYLOAD, "state": "ts"}).json()
         assert body["peer_found"] is True
+
+
+class TestRootContentNegotiation:
+    """The root URL is the one people open first, so it has to work for both of
+    the things that visit it: a browser and an HTTP client."""
+
+    BROWSER_ACCEPT = (
+        "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,*/*;q=0.8"
+    )
+
+    def test_browsers_get_the_dashboard(self, client: TestClient) -> None:
+        response = client.get("/", headers={"Accept": self.BROWSER_ACCEPT})
+        assert response.status_code == 200
+        assert response.headers["content-type"].startswith("text/html")
+        assert "<title>claimsight" in response.text
+
+    def test_api_clients_still_get_the_json_index(self, client: TestClient) -> None:
+        response = client.get("/")
+        assert response.status_code == 200
+        assert response.headers["content-type"].startswith("application/json")
+        body = response.json()
+        assert body["service"] == "claimsight"
+        assert "GET /dashboard" in body["endpoints"]
+
+    def test_wildcard_accept_is_treated_as_an_api_client(self, client: TestClient) -> None:
+        """curl and httpx default to */*; they must not receive an HTML page."""
+        response = client.get("/", headers={"Accept": "*/*"})
+        assert response.json()["service"] == "claimsight"
+
+    def test_json_preferred_over_html_gets_json(self, client: TestClient) -> None:
+        response = client.get("/", headers={"Accept": "application/json"})
+        assert response.headers["content-type"].startswith("application/json")

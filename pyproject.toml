@@ -39,6 +39,11 @@ claimsight = "claimsight.cli:app"
 [tool.setuptools.packages.find]
 where = ["src"]
 
+# The dashboard is a single self-contained HTML file served by the API. Declared
+# explicitly because setuptools only auto-includes Python sources.
+[tool.setuptools.package-data]
+"claimsight.api" = ["static/*.html"]
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = "-q --strict-markers"

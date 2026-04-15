@@ -61,6 +61,36 @@ IQR_SCALE: Final[float] = 1.349
 #: (197,283 rows == 197,283 distinct (provider_id, drg) pairs).
 CLAIM_KEY: Final[tuple[str, str]] = ("provider_id", "drg")
 
+#: Raw-magnitude features: the ORIGINAL forest input, retained for comparison.
+#: Dominated by case-mix -- a heart transplant is extreme in absolute dollars
+#: without being an anomalous bill, so the forest mostly detects "rare,
+#: expensive procedure" rather than "unusual billing". Kept as a named constant
+#: so the improvement over it is reproducible from a single run instead of being
+#: a claim in the README that nobody can check.
+RAW_MAGNITUDE_FEATURES: Final[tuple[str, ...]] = (
+    "log_charges",
+    "log_total_payments",
+    "log_medicare_payments",
+    "markup_ratio",
+    "log_discharges",
+    "non_medicare_share",
+)
+
+#: Case-mix-normalised features: every magnitude expressed as a log-ratio
+#: against its DRG's NATIONAL median. This removes procedure-mix confounding
+#: while staying independent of the peer hierarchy -- national DRG medians are a
+#: strictly coarser grouping than the (possibly HRR- or state-level) peer group
+#: the robust z-score is measured against, and they come from a separate window
+#: function rather than reusing peer_median / peer_mad.
+CASE_MIX_NORMALIZED_FEATURES: Final[tuple[str, ...]] = (
+    "charges_vs_drg",
+    "total_vs_drg",
+    "medicare_vs_drg",
+    "volume_vs_drg",
+    "markup_vs_drg",
+    "non_medicare_share",
+)
+
 
 @dataclass(frozen=True)
 class ScoringConfig:
@@ -94,36 +124,73 @@ class ScoringConfig:
     iforest_contamination: float = 0.01
     iforest_sample_size: int = 50_000
     random_state: int = 42
-    #: Features for the Isolation Forest. Deliberately excludes anything
-    #: derived from peer groups so the two methods stay independent.
-    iforest_features: Sequence[str] = field(
-        default=(
-            "log_charges",
-            "log_total_payments",
-            "log_medicare_payments",
-            "markup_ratio",
-            "log_discharges",
-            "non_medicare_share",
-        )
-    )
+    #: Features for the Isolation Forest. Defaults to the case-mix-normalised
+    #: set. Excludes everything derived from the peer hierarchy (peer_median,
+    #: peer_mad, robust z) so the forest remains a genuinely second opinion.
+    iforest_features: Sequence[str] = field(default=CASE_MIX_NORMALIZED_FEATURES)
 
 
 SCORED_VIEW: Final[str] = "claim_scores"
 
 
+def _log_ratio(numerator: str, denominator: str) -> str:
+    """Symmetric log-ratio, guarded against zero denominators.
+
+    ``greatest(x, 1e-9)`` stops a legitimate $0 payment from producing
+    ``ln(0) = -inf``, which would otherwise reach the forest as a non-finite
+    feature and quietly dominate every split it appears in.
+    """
+    return f"ln(greatest({numerator}, 1e-9) / greatest({denominator}, 1e-9))"
+
+
+def _normalization_sql() -> str:
+    """DRG national medians, as window functions over the whole relation.
+
+    Deliberately independent of :mod:`claimsight.peers`: this always partitions
+    by DRG nationwide, whatever level the peer hierarchy selected for the robust
+    z-score. That separation is what keeps the Isolation Forest a second opinion
+    rather than a rescaling of the first one.
+    """
+    return """
+        CAST(median(avg_covered_charges)   OVER (PARTITION BY drg) AS DOUBLE)
+            AS drg_med_charges,
+        CAST(median(avg_total_payments)    OVER (PARTITION BY drg) AS DOUBLE)
+            AS drg_med_total,
+        CAST(median(avg_medicare_payments) OVER (PARTITION BY drg) AS DOUBLE)
+            AS drg_med_medicare,
+        CAST(median(total_discharges)      OVER (PARTITION BY drg) AS DOUBLE)
+            AS drg_med_discharges,
+        CAST(median(markup_ratio)          OVER (PARTITION BY drg) AS DOUBLE)
+            AS drg_med_markup"""
+
+
 def _feature_sql(cfg: ScoringConfig) -> str:
     """Derived columns used by both the robust score and the Isolation Forest.
 
-    Log transforms compress the multi-order-of-magnitude spread in dollar
-    columns; ``non_medicare_share`` is the portion of the bill *not* covered by
-    Medicare, a genuinely distinct signal from the markup ratio.
+    References the DRG medians from :func:`_normalization_sql`, so this must run
+    in a CTE *after* the normalisation one -- SQL cannot reference an alias
+    defined in the same SELECT list.
+
+    Both feature sets are computed on every run; ``cfg.iforest_features`` only
+    chooses which the forest consumes. Computing both is free at this scale and
+    makes the raw-vs-normalised comparison reproducible from a single pipeline
+    run rather than a claim nobody can verify.
     """
     metric = cfg.metric
     return f"""
+        -- Raw magnitudes: the original forest input, case-mix confounded.
         ln(1 + greatest(avg_covered_charges, 0))   AS log_charges,
         ln(1 + greatest(avg_total_payments, 0))    AS log_total_payments,
         ln(1 + greatest(avg_medicare_payments, 0)) AS log_medicare_payments,
         ln(1 + greatest(total_discharges, 0))      AS log_discharges,
+        -- Case-mix-normalised: log-ratio against this DRG's national median.
+        {_log_ratio("avg_covered_charges", "drg_med_charges")}    AS charges_vs_drg,
+        {_log_ratio("avg_total_payments", "drg_med_total")}       AS total_vs_drg,
+        {_log_ratio("avg_medicare_payments", "drg_med_medicare")} AS medicare_vs_drg,
+        {_log_ratio("total_discharges", "drg_med_discharges")}    AS volume_vs_drg,
+        {_log_ratio(metric, "drg_med_markup")}                    AS markup_vs_drg,
+        -- Scale-free in either framing: the share of the bill Medicare did NOT
+        -- pay, a genuinely distinct signal from the markup ratio.
         CASE WHEN avg_total_payments > 0
              THEN (avg_total_payments - avg_medicare_payments) / avg_total_payments
              ELSE NULL END                          AS non_medicare_share,
@@ -244,9 +311,13 @@ def score_claims(
     con.execute(
         f"""
         CREATE OR REPLACE VIEW {view} AS
-        WITH featured AS (
-            SELECT c.*, {_feature_sql(cfg)}
+        WITH normalized AS (
+            SELECT c.*, {_normalization_sql()}
             FROM {source_view} AS c
+        ),
+        featured AS (
+            SELECT n.*, {_feature_sql(cfg)}
+            FROM normalized AS n
         )
         SELECT
             f.*,
@@ -294,11 +365,23 @@ def add_isolation_forest(
     keys = list(CLAIM_KEY)
 
     t0 = time.perf_counter()
+    # ORDER BY the unique claim key. Not cosmetic:
+    #
+    # The fit subsample below is chosen *positionally* (rng.choice over row
+    # indices), so the fitted forest depends on the order rows arrive in. This
+    # view is built from joins and window aggregates, and DuckDB does not
+    # guarantee a plan's output order across runs or thread schedules. Two
+    # identical runs of the full FY2016 file disagreed by 37 forest flags
+    # (1,923 vs 1,960) for exactly this reason -- which quietly invalidated the
+    # "the pipeline is deterministic, so no model needs to be persisted" claim.
+    # Sorting by a unique key costs ~0.1s on 197k rows and makes the subsample,
+    # and therefore the forest, reproducible.
     frame = con.sql(
         f"""
         SELECT {', '.join(keys)}, {', '.join(features)}
         FROM {view}
         WHERE {' AND '.join(f'{f} IS NOT NULL' for f in features)}
+        ORDER BY {', '.join(keys)}
         """
     ).df()
 

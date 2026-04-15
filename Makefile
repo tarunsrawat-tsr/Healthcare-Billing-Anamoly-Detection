@@ -8,10 +8,12 @@ PIP         := $(PYTHON) -m pip
 DATA_FULL   := data/raw/cms_inpatient_fy2016.csv
 DATA_SAMPLE := data/sample/cms_inpatient_fy2016_sample.csv
 REPORT_JSON := artifacts/report.json
+DRIFT_JSON  := artifacts/drift.json
 
 .DEFAULT_GOAL := help
 .PHONY: help install install-dev lint format typecheck test coverage \
-        data sample report fairness serve docker-build docker-run clean
+        data sample report save runs drift fairness serve docker-build \
+        docker-run clean
 
 help:  ## Show this help
 	@grep -hE '^[a-z-]+:.*?## ' $(MAKEFILE_LIST) \
@@ -47,10 +49,24 @@ report:  ## Full pipeline -> anomaly report on stdout + JSON
 	@mkdir -p artifacts
 	$(PYTHON) -m claimsight.cli report --json $(REPORT_JSON) $(if $(wildcard $(DATA_FULL)),$(DATA_FULL),$(DATA_SAMPLE))
 
+save:  ## Score the data and persist a run (manifest + review queue + drift profile)
+	@mkdir -p artifacts
+	$(PYTHON) -m claimsight.cli report --save $(if $(wildcard $(DATA_FULL)),$(DATA_FULL),$(DATA_SAMPLE))
+
+runs:  ## List saved runs in the artifact registry
+	$(PYTHON) -m claimsight.cli runs
+
+drift:  ## PSI drift check of the current file against the latest saved run
+	@mkdir -p artifacts
+	$(PYTHON) -m claimsight.cli drift --json $(DRIFT_JSON) \
+	  $(if $(wildcard $(DATA_FULL)),$(DATA_FULL),$(DATA_SAMPLE))
+
 fairness:  ## Audit flag rates across hospital size bands and states
 	$(PYTHON) -m claimsight.cli fairness $(if $(wildcard $(DATA_FULL)),$(DATA_FULL),$(DATA_SAMPLE))
 
-serve:  ## Run the API locally
+serve:  ## Run the API + dashboard locally (http://localhost:8000/dashboard)
+	@echo "  dashboard  -> http://localhost:8000/dashboard"
+	@echo "  api docs   -> http://localhost:8000/docs"
 	$(PYTHON) -m uvicorn claimsight.api.main:app --host 0.0.0.0 --port 8000 --reload
 
 docker-build:  ## Build the container image

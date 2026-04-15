@@ -7,6 +7,7 @@ project is that the pipeline is inspectable at each stage.
 from __future__ import annotations
 
 import json
+import time
 from pathlib import Path
 
 import duckdb
@@ -18,6 +19,13 @@ from . import __version__
 from .config import get_settings
 from .ingest import load_claims, write_parquet
 from .peers import build_peer_stats, peer_level_summary
+from .registry import (
+    drift_against_run,
+    latest_run,
+    list_runs,
+    load_run,
+    save_run,
+)
 from .scoring import (
     SCORED_VIEW,
     ScoringConfig,
@@ -44,6 +52,7 @@ def _pipeline(
     persist: Path | None,
 ) -> tuple[duckdb.DuckDBPyConnection, dict[str, object]]:
     """Run ingest -> peers -> score -> (forest) and collect diagnostics."""
+    started = time.perf_counter()
     con = duckdb.connect(str(persist) if persist else ":memory:")
     con, ingest_report = load_claims(source, con)
     build_peer_stats(con, min_support=get_settings().min_support, metric=cfg.metric)
@@ -66,7 +75,9 @@ def _pipeline(
             FROM {SCORED_VIEW}_flagged
             """
         )
+    elapsed = time.perf_counter() - started
     return con, {
+        "elapsed_seconds": round(elapsed, 3),
         "ingest": ingest_report.as_dict(),
         "peer_levels": peer_level_summary(con),
         "isolation_forest": forest_diag,
@@ -150,6 +161,9 @@ def report(
     top: int = typer.Option(15, help="how many worst offenders to list"),
     no_forest: bool = typer.Option(False, help="skip the Isolation Forest (faster)"),
     json_out: Path = typer.Option(None, "--json", help="also write diagnostics as JSON"),
+    save: bool = typer.Option(
+        False, "--save", help="persist this run to artifacts/runs/ (manifest + review queue)"
+    ),
 ) -> None:
     """Run the full pipeline and print the anomaly report."""
     settings = get_settings()
@@ -222,6 +236,25 @@ def report(
         json_out.write_text(json.dumps(diagnostics, indent=2, default=str))
         console.print(f"[green]wrote[/green] {json_out}")
 
+    if save:
+        record = save_run(
+            con,
+            cfg,
+            source=path,
+            min_support=get_settings().min_support,
+            ingest_report=diagnostics.get("ingest"),
+            elapsed_seconds=diagnostics.get("elapsed_seconds"),
+        )
+        console.print(
+            f"[green]saved run[/green] {record.run_id} -> {record.path}\n"
+            f"  manifest:    {record.path / 'manifest.json'}\n"
+            f"  review queue: {record.outliers_path} ({record.rows_flagged:,} rows)"
+        )
+        console.print(
+            "[dim]compare a future file against this baseline with: "
+            f"claimsight drift <new.csv> --baseline {record.run_id}[/dim]"
+        )
+
 
 @app.command()
 def fairness(
@@ -268,6 +301,164 @@ def fairness(
         ORDER BY flag_rate_pct DESC LIMIT 10
         """
     ).show()
+
+
+@app.command()
+def runs(
+    run_id: str = typer.Argument(None, help="inspect one run's manifest instead of listing all"),
+    as_json: bool = typer.Option(False, "--json", help="print the raw manifest as JSON"),
+) -> None:
+    """List saved runs in the artifact registry, or dump one manifest."""
+    if run_id:
+        record = load_run(run_id)
+        if as_json:
+            console.print_json(json.dumps(record.manifest, default=str))
+            return
+        manifest = record.manifest
+        table = Table(title=f"Run {record.run_id}")
+        table.add_column("field", style="cyan")
+        table.add_column("value")
+        metrics = manifest.get("metrics", {})
+        source = manifest.get("source", {})
+        for key, value in (
+            ("created at", manifest.get("created_at")),
+            ("source", source.get("name")),
+            ("source sha256", (source.get("sha256") or "")[:16] + "..."),
+            ("rows", f"{metrics.get('rows_scored', 0):,}"),
+            ("flagged (peer)", f"{metrics.get('flagged_peer', 0):,}"),
+            ("flag rate %", metrics.get("flagged_peer_pct")),
+            ("flagged (forest)", f"{metrics.get('flagged_iforest', 0):,}"),
+            ("jaccard", metrics.get("jaccard")),
+            ("elapsed s", manifest.get("elapsed_seconds")),
+            ("review queue", f"{manifest.get('review_queue', {}).get('rows', 0):,} rows"),
+            ("duckdb", manifest.get("environment", {}).get("duckdb")),
+            ("claimsight", manifest.get("environment", {}).get("claimsight")),
+        ):
+            table.add_row(key, str(value))
+        console.print(table)
+        console.print(f"[dim]queue:[/dim] {record.outliers_path}")
+        return
+
+    records = list_runs()
+    if not records:
+        console.print(
+            "[yellow]no saved runs yet[/yellow] -- create one with "
+            "[bold]claimsight report --save[/bold]"
+        )
+        return
+
+    table = Table(title=f"Saved runs ({len(records)}) — newest first")
+    # The run id must stay readable in full: it is what gets pasted into
+    # --baseline. Fold rather than ellipsise so a narrow terminal wraps it
+    # instead of hiding the part the user needs.
+    table.add_column("run id", justify="left", no_wrap=True, overflow="fold")
+    table.add_column("date", justify="left", no_wrap=True)
+    # No sha column here: it is in `runs <id>`, and the listing has to fit a
+    # run id, a date and five numbers in 80 characters.
+    for column in ("rows", "flagged", "flag %", "source", "secs"):
+        table.add_column(column, justify="left" if column == "source" else "right")
+    for record in records:
+        metrics = record.manifest.get("metrics", {})
+        source = record.manifest.get("source", {})
+        table.add_row(
+            record.run_id,
+            str(record.manifest.get("created_at", ""))[:10],
+            f"{metrics.get('rows_scored', 0):,}",
+            f"{metrics.get('flagged_peer', 0):,}",
+            str(metrics.get("flagged_peer_pct")),
+            str(source.get("name", ""))[:18],
+            str(record.manifest.get("elapsed_seconds")),
+        )
+    console.print(table)
+
+
+@app.command()
+def drift(
+    source: Path = typer.Argument(
+        None, help="new claims file (defaults to full file, else sample)"
+    ),
+    baseline: str = typer.Option(
+        None, "--baseline", help="run id to compare against (default: most recent saved run)"
+    ),
+    z_threshold: float = typer.Option(3.5, help="robust z above which a row is an outlier"),
+    confidence_floor: float = typer.Option(0.25, help="minimum confidence to flag"),
+    json_out: Path = typer.Option(None, "--json", help="write the drift report as JSON"),
+) -> None:
+    """Check whether a new claims file has drifted from a saved baseline run.
+
+    Scores the new file with the same config, then computes the Population
+    Stability Index of each monitored feature against the baseline's stored
+    quantile edges. Exits non-zero on a significant shift so this can gate a
+    scheduled job.
+    """
+    settings = get_settings()
+    path = source or settings.resolve_input()
+    record = load_run(baseline) if baseline else latest_run()
+    if record is None:
+        console.print(
+            "[red]no baseline run saved[/red] -- create one first with "
+            "[bold]claimsight report --save[/bold]"
+        )
+        raise typer.Exit(code=2)
+
+    cfg = ScoringConfig(z_threshold=z_threshold, confidence_floor=confidence_floor)
+    console.print(
+        f"[bold]drift check[/bold] {path.name} [dim]vs[/dim] baseline {record.run_id} "
+        f"[dim]({record.manifest.get('source', {}).get('name')})[/dim]"
+    )
+    # The forest is skipped deliberately: every monitored feature is a peer or
+    # payment statistic, and re-fitting 100 trees to detect distribution shift
+    # would buy nothing.
+    con, _ = _pipeline(path, cfg, with_forest=False, persist=None)
+    report = drift_against_run(record, con)
+
+    table = Table(title=f"Population Stability Index — {report.verdict}")
+    for column in ("feature", "PSI", "band", "baseline median", "current median", "Δ median"):
+        table.add_column(column, justify="left" if column in ("feature", "band") else "right")
+    for entry in report.features:
+        base, curr = entry.baseline_median, entry.current_median
+        delta = ""
+        if base not in (None, 0) and curr is not None:
+            delta = f"{100.0 * (curr - base) / abs(base):+.1f}%"
+        table.add_row(
+            entry.feature,
+            f"{entry.psi:.4f}",
+            entry.interpretation,
+            f"{base:,.2f}" if base is not None else "—",
+            f"{curr:,.2f}" if curr is not None else "—",
+            delta,
+        )
+    console.print(table)
+
+    console.print(
+        f"rows: {report.baseline_rows or 0:,} -> {report.current_rows:,}   "
+        f"flag rate: {report.baseline_flag_rate_pct}% -> {report.current_flag_rate_pct}% "
+        f"({report.flag_rate_delta:+.2f} pp)"
+        if report.flag_rate_delta is not None
+        else f"rows: {report.baseline_rows or 0:,} -> {report.current_rows:,}"
+    )
+    if report.max_psi >= 0.25:
+        console.print(
+            f"[red]significant drift[/red] in [bold]{report.worst_feature}[/bold] "
+            "(PSI >= 0.25): the baseline is no longer representative. Re-baseline "
+            "and re-review the thresholds before trusting this run's flags."
+        )
+    elif report.max_psi >= 0.10:
+        console.print(
+            f"[yellow]moderate drift[/yellow] in [bold]{report.worst_feature}[/bold] "
+            "(PSI >= 0.10): worth a look, not an alarm."
+        )
+    else:
+        console.print("[green]distributions stable[/green] (all PSI < 0.10).")
+
+    if json_out:
+        json_out.parent.mkdir(parents=True, exist_ok=True)
+        payload = {"baseline_run": record.run_id, **report.as_dict()}
+        json_out.write_text(json.dumps(payload, indent=2, default=str))
+        console.print(f"[green]wrote[/green] {json_out}")
+
+    if report.max_psi >= 0.25:
+        raise typer.Exit(code=1)
 
 
 if __name__ == "__main__":
