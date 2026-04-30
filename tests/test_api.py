@@ -156,18 +156,19 @@ class TestScoreEndpoint:
         # The API rounds floats to RESPONSE_PRECISION for presentation; the
         # batch path keeps full precision. Rounding happens after every guard,
         # so it cannot change the verdict -- hence abs= rather than an exact match.
-        tol = 10 ** -RESPONSE_PRECISION
+        tol = 10**-RESPONSE_PRECISION
         assert body["relative_excess"] == pytest.approx(30.0 / 5.25, abs=tol)
         assert body["robust_z"] == pytest.approx(robust_z(30.0, 5.25, 0.75), abs=tol)
-        assert body["confidence"] == pytest.approx(
-            confidence(8, 27, ScoringConfig()), abs=tol
-        )
+        assert body["confidence"] == pytest.approx(confidence(8, 27, ScoringConfig()), abs=tol)
         assert body["would_flag"] is True
         assert body["reason"].startswith("high_markup")
 
     def test_a_normal_claim_is_not_flagged(self, client: TestClient) -> None:
-        payload = {**self.PAYLOAD, "avg_covered_charges": 50000.00,
-                   "avg_medicare_payments": 10000.00}
+        payload = {
+            **self.PAYLOAD,
+            "avg_covered_charges": 50000.00,
+            "avg_medicare_payments": 10000.00,
+        }
         body = client.post("/score", json=payload).json()
         assert body["markup_ratio"] == pytest.approx(5.0)
         assert body["would_flag"] is False
@@ -175,8 +176,11 @@ class TestScoreEndpoint:
 
     def test_thin_dispersion_guard_is_enforced(self, client: TestClient) -> None:
         """A statistically extreme but practically trivial claim must not flag."""
-        payload = {**self.PAYLOAD, "avg_covered_charges": 51000.00,
-                   "avg_medicare_payments": 10000.00}
+        payload = {
+            **self.PAYLOAD,
+            "avg_covered_charges": 51000.00,
+            "avg_medicare_payments": 10000.00,
+        }
         body = client.post("/score", json=payload).json()
         assert body["markup_ratio"] == pytest.approx(5.1)
         assert body["would_flag"] is False
@@ -207,13 +211,13 @@ class TestScoreEndpoint:
     @pytest.mark.parametrize(
         "override",
         [
-            {"total_discharges": 0},          # not > 0
+            {"total_discharges": 0},  # not > 0
             {"total_discharges": -5},
-            {"avg_covered_charges": 0},       # not > 0
+            {"avg_covered_charges": 0},  # not > 0
             {"avg_medicare_payments": -1.0},
-            {"state": "TSX"},                 # max_length 2
+            {"state": "TSX"},  # max_length 2
             {"state": ""},
-            {"drg": ""},                      # min_length 1
+            {"drg": ""},  # min_length 1
         ],
     )
     def test_validation_rejects_invalid_claims(self, client: TestClient, override: dict) -> None:
@@ -233,9 +237,7 @@ class TestRootContentNegotiation:
     """The root URL is the one people open first, so it has to work for both of
     the things that visit it: a browser and an HTTP client."""
 
-    BROWSER_ACCEPT = (
-        "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,*/*;q=0.8"
-    )
+    BROWSER_ACCEPT = "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,*/*;q=0.8"
 
     def test_browsers_get_the_dashboard(self, client: TestClient) -> None:
         response = client.get("/", headers={"Accept": self.BROWSER_ACCEPT})

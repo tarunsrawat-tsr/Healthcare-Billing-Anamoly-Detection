@@ -102,9 +102,7 @@ class TestSaveRun:
         for key in ("claimsight", "python", "duckdb", "numpy", "scikit-learn"):
             assert manifest["environment"][key]
 
-    def test_manifest_records_the_config_actually_used(
-        self, final_con, settings: Settings
-    ) -> None:
+    def test_manifest_records_the_config_actually_used(self, final_con, settings: Settings) -> None:
         cfg = ScoringConfig(z_threshold=4.0, confidence_floor=0.3)
         record = _save(final_con, settings, run_id="20260101T000000Z", config=cfg)
         assert record.manifest["config"]["z_threshold"] == 4.0
@@ -151,9 +149,9 @@ class TestSaveRun:
         self, final_con, settings: Settings
     ) -> None:
         record = _save(final_con, settings, run_id="20260101T000000Z")
-        queue = duckdb.connect().sql(
-            f"SELECT * FROM read_parquet('{record.outliers_path}')"
-        ).fetchdf()
+        queue = (
+            duckdb.connect().sql(f"SELECT * FROM read_parquet('{record.outliers_path}')").fetchdf()
+        )
         assert len(queue) == record.rows_flagged
         assert queue["flagged_peer"].all()
         excess = list(queue["relative_excess"])
@@ -315,9 +313,7 @@ class TestDriftAgainstRun:
             FROM {FINAL_VIEW}
             """
         )
-        report = drift_against_run(
-            "20260101T000000Z", final_con, view="drifted", settings=settings
-        )
+        report = drift_against_run("20260101T000000Z", final_con, view="drifted", settings=settings)
         by_name = {f.feature: f for f in report.features}
         assert by_name["markup_ratio"].psi > 0.25
         assert report.verdict == "significant shift"

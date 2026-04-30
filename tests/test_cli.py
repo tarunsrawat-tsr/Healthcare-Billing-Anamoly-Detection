@@ -65,9 +65,7 @@ class TestPeers:
 
 class TestReport:
     def test_prints_summary_and_top_claims(self) -> None:
-        result = runner.invoke(
-            app, ["report", str(TINY_CLAIMS), "--no-forest", "--top", "5"]
-        )
+        result = runner.invoke(app, ["report", str(TINY_CLAIMS), "--no-forest", "--top", "5"])
         assert result.exit_code == 0
         assert "rows scored" in result.stdout
         assert OUTLIER_PROVIDER in result.stdout or "OUTLIER MEMORIAL" in result.stdout
@@ -99,8 +97,13 @@ class TestReport:
         result = runner.invoke(
             app,
             [
-                "report", str(TINY_CLAIMS), "--no-forest",
-                "--z-threshold", "1000", "--json", str(out),
+                "report",
+                str(TINY_CLAIMS),
+                "--no-forest",
+                "--z-threshold",
+                "1000",
+                "--json",
+                str(out),
             ],
         )
         assert result.exit_code == 0

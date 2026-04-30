@@ -200,7 +200,7 @@ class TestPythonAndSqlParsersAgree:
     def test_money_agrees(self, con) -> None:
         expr = _column("avg_covered_charges").expression('"v"')
         for raw in self.TRICKY_MONEY:
-            sql_val = con.execute(f'SELECT {expr} FROM (SELECT ? AS v)', [raw]).fetchone()[0]
+            sql_val = con.execute(f"SELECT {expr} FROM (SELECT ? AS v)", [raw]).fetchone()[0]
             py_val = schema.parse_money(raw if raw.strip() else None)
             assert (sql_val is None) == (py_val is None), f"nullability differs for {raw!r}"
             if sql_val is not None:
@@ -209,7 +209,7 @@ class TestPythonAndSqlParsersAgree:
     def test_integer_agrees(self, con) -> None:
         expr = _column("total_discharges").expression('"v"')
         for raw in self.TRICKY_INT:
-            sql_val = con.execute(f'SELECT {expr} FROM (SELECT ? AS v)', [raw]).fetchone()[0]
+            sql_val = con.execute(f"SELECT {expr} FROM (SELECT ? AS v)", [raw]).fetchone()[0]
             py_val = schema.parse_integer(raw if raw.strip() else None)
             assert sql_val == py_val, f"disagreement on {raw!r}: sql={sql_val} py={py_val}"
 

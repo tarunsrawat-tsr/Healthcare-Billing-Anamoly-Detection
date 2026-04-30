@@ -378,10 +378,10 @@ def add_isolation_forest(
     # and therefore the forest, reproducible.
     frame = con.sql(
         f"""
-        SELECT {', '.join(keys)}, {', '.join(features)}
+        SELECT {", ".join(keys)}, {", ".join(features)}
         FROM {view}
-        WHERE {' AND '.join(f'{f} IS NOT NULL' for f in features)}
-        ORDER BY {', '.join(keys)}
+        WHERE {" AND ".join(f"{f} IS NOT NULL" for f in features)}
+        ORDER BY {", ".join(keys)}
         """
     ).df()
 
@@ -432,9 +432,7 @@ def add_isolation_forest(
     # a working service and a 500 on every scored endpoint. Materialising also
     # avoids re-scanning a pandas frame on every query.
     con.register("_iforest_scores_frame", scored)
-    con.execute(
-        "CREATE OR REPLACE TABLE iforest_scores AS SELECT * FROM _iforest_scores_frame"
-    )
+    con.execute("CREATE OR REPLACE TABLE iforest_scores AS SELECT * FROM _iforest_scores_frame")
     con.unregister("_iforest_scores_frame")
 
     con.execute(
@@ -445,7 +443,7 @@ def add_isolation_forest(
                    AS flagged_both
         FROM {view}_flagged AS s
         LEFT JOIN iforest_scores AS i
-          ON {' AND '.join(f's.{k} = i.{k}' for k in keys)}
+          ON {" AND ".join(f"s.{k} = i.{k}" for k in keys)}
         """
     )
 
@@ -537,9 +535,7 @@ def summarise(
         "max_relative_excess": num("max_relative_excess", 2),
         "distinct_providers_flagged_peer": int(row["providers_peer"] or 0),
         "distinct_providers_flagged_both": int(row["providers_both"] or 0),
-        "flag_reasons": [
-            {"reason": r[0], "rows": int(r[1]), "pct": float(r[2])} for r in reasons
-        ],
+        "flag_reasons": [{"reason": r[0], "rows": int(r[1]), "pct": float(r[2])} for r in reasons],
     }
 
 

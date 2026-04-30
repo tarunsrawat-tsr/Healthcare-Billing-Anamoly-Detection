@@ -165,16 +165,9 @@ class TestConfidence:
     def test_low_confidence_rows_are_not_flagged(self, scored) -> None:
         cfg = ScoringConfig(confidence_floor=0.99)
         score_claims(scored, cfg)
-        flagged = scored.sql(
-            f"SELECT count(*) FROM {VIEW} WHERE flagged_peer"
-        ).fetchone()[0]
+        flagged = scored.sql(f"SELECT count(*) FROM {VIEW} WHERE flagged_peer").fetchone()[0]
         assert flagged == 0
-        reasons = {
-            r[0]
-            for r in scored.sql(
-                f"SELECT DISTINCT flag_reason FROM {VIEW}"
-            ).fetchall()
-        }
+        reasons = {r[0] for r in scored.sql(f"SELECT DISTINCT flag_reason FROM {VIEW}").fetchall()}
         assert "low_confidence" in reasons
 
 
@@ -303,17 +296,14 @@ class TestPracticalSignificanceGuards:
         }.items():
             score_claims(scored, cfg)
             reasons = {
-                r[0]
-                for r in scored.sql(f"SELECT DISTINCT flag_reason FROM {VIEW}").fetchall()
+                r[0] for r in scored.sql(f"SELECT DISTINCT flag_reason FROM {VIEW}").fetchall()
             }
             observed[label] = label in reasons
         assert all(observed.values()), observed
 
 
 def _row_with(con, provider_id: str, column: str):
-    return con.sql(
-        f"SELECT {column} FROM {VIEW} WHERE provider_id = '{provider_id}'"
-    ).fetchone()[0]
+    return con.sql(f"SELECT {column} FROM {VIEW} WHERE provider_id = '{provider_id}'").fetchone()[0]
 
 
 class TestSummariseContract:
@@ -366,9 +356,7 @@ class TestDispersionFallbackChain:
 
     def test_twin_signature_stays_backwards_compatible(self) -> None:
         """Existing three-argument callers must keep working unchanged."""
-        assert robust_z(30.0, 5.25, 0.75) == pytest.approx(
-            (30.0 - 5.25) / (MAD_SCALE * 0.75)
-        )
+        assert robust_z(30.0, 5.25, 0.75) == pytest.approx((30.0 - 5.25) / (MAD_SCALE * 0.75))
 
 
 class TestCursorVisibility:
@@ -399,20 +387,22 @@ class TestCursorVisibility:
         """The fix: materialise, so the catalog -- not a Python object -- owns it."""
         add_isolation_forest(scored, ScoringConfig())
         kinds = dict(
-            scored.sql(
-                "SELECT table_name, table_type FROM information_schema.tables"
-            ).fetchall()
+            scored.sql("SELECT table_name, table_type FROM information_schema.tables").fetchall()
         )
         assert kinds.get("iforest_scores") == "BASE TABLE"
 
     def test_querying_the_final_view_does_not_need_the_dataframe(self, scored) -> None:
         """A fresh cursor must work even though the pandas frame is long gone."""
         add_isolation_forest(scored, ScoringConfig())
-        row = scored.cursor().sql(
-            """SELECT count(*) AS n,
+        row = (
+            scored.cursor()
+            .sql(
+                """SELECT count(*) AS n,
                       sum(CASE WHEN iforest_score IS NOT NULL THEN 1 ELSE 0 END) AS scored
                FROM claim_scores_final"""
-        ).fetchone()
+            )
+            .fetchone()
+        )
         assert row[0] == 17
         assert row[1] == 17
 

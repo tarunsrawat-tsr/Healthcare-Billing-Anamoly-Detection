@@ -158,8 +158,7 @@ def save_run(
     available = {
         row[0]
         for row in con.sql(
-            "SELECT column_name FROM information_schema.columns "
-            f"WHERE table_name = '{FINAL_VIEW}'"
+            f"SELECT column_name FROM information_schema.columns WHERE table_name = '{FINAL_VIEW}'"
         ).fetchall()
     }
     columns = [c for c in REVIEW_COLUMNS if c in available]
@@ -172,7 +171,7 @@ def save_run(
     con.execute(
         f"""
         COPY (
-            SELECT {', '.join(columns)}
+            SELECT {", ".join(columns)}
             FROM {FINAL_VIEW}
             WHERE flagged_peer
             ORDER BY relative_excess DESC
@@ -180,9 +179,7 @@ def save_run(
         """
     )
 
-    queue_rows = con.sql(
-        f"SELECT count(*) FROM {FINAL_VIEW} WHERE flagged_peer"
-    ).fetchone()[0]
+    queue_rows = con.sql(f"SELECT count(*) FROM {FINAL_VIEW} WHERE flagged_peer").fetchone()[0]
 
     manifest: dict[str, Any] = {
         "run_id": run_id,
@@ -266,9 +263,7 @@ def latest_run(settings: Settings | None = None) -> RunRecord | None:
     return runs[0] if runs else None
 
 
-def compare_runs(
-    baseline: RunRecord, current: RunRecord
-) -> dict[str, Any]:
+def compare_runs(baseline: RunRecord, current: RunRecord) -> dict[str, Any]:
     """Diff two runs' headline metrics.
 
     The point of a registry is not storage, it is being able to say what changed.

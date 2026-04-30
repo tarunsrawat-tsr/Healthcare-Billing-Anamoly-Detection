@@ -145,10 +145,7 @@ def source_relation(path: str) -> str:
     """
     escaped = str(path).replace("'", "''")
     colspec = ", ".join(f"'{c.raw}': 'VARCHAR'" for c in COLUMNS)
-    return (
-        f"read_csv('{escaped}', header=true, auto_detect=false, "
-        f"columns={{{colspec}}})"
-    )
+    return f"read_csv('{escaped}', header=true, auto_detect=false, columns={{{colspec}}})"
 
 
 # --------------------------------------------------------------------------- #
@@ -158,9 +155,7 @@ def source_relation(path: str) -> str:
 #: A number with optional thousands separators and an optional sign. Applied
 #: *after* currency symbols are stripped, so the sign may sit on either side of
 #: the symbol ("-$12.50" and "$-12.50" both occur in accounting exports).
-_NUMBER_RE: Final = re.compile(
-    r"^[+-]?(?:\d{1,3}(?:,\d{3})+|\d+)(?:\.\d+)?$"
-)
+_NUMBER_RE: Final = re.compile(r"^[+-]?(?:\d{1,3}(?:,\d{3})+|\d+)(?:\.\d+)?$")
 _INT_RE: Final = re.compile(r"^[+-]?(?:\d{1,3}(?:,\d{3})+|\d+)$")
 
 

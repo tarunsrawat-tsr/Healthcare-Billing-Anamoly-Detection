@@ -173,8 +173,7 @@ def build_peer_stats(
         for lvl in levels
     )
     case_level = " ".join(
-        f"WHEN {qualified(lvl, 'peer_n')} >= {min_support} THEN '{lvl.name}'"
-        for lvl in levels
+        f"WHEN {qualified(lvl, 'peer_n')} >= {min_support} THEN '{lvl.name}'" for lvl in levels
     )
     fallback = levels[-1].name
 
@@ -194,10 +193,10 @@ def build_peer_stats(
             c.*,
             CASE {case_level} ELSE '{fallback}' END AS peer_level,
             CASE {case_n} ELSE s_{fallback}.peer_n END AS peer_n,
-            {pick('peer_median')} AS peer_median,
-            {pick('peer_mad')}    AS peer_mad,
-            {pick('peer_p25')}    AS peer_p25,
-            {pick('peer_p75')}    AS peer_p75
+            {pick("peer_median")} AS peer_median,
+            {pick("peer_mad")}    AS peer_mad,
+            {pick("peer_p25")}    AS peer_p25,
+            {pick("peer_p75")}    AS peer_p75
         FROM claims AS c
         {joins}
         """

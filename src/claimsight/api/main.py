@@ -117,10 +117,24 @@ HistogramColumn = Literal[tuple(HISTOGRAM_COLUMNS)]  # type: ignore[valid-type]
 #: Kept as a module constant because the two endpoints used to carry separate
 #: copies and a field added to one silently mis-aligned the other.
 OUTLIER_COLUMNS: tuple[str, ...] = (
-    "provider_id", "provider_name", "city", "state", "drg", "total_discharges",
-    "avg_covered_charges", "avg_medicare_payments",
-    "markup_ratio", "peer_median", "peer_n", "peer_level", "relative_excess",
-    "robust_z", "confidence", "flag_reason", "flagged_peer", "flagged_both",
+    "provider_id",
+    "provider_name",
+    "city",
+    "state",
+    "drg",
+    "total_discharges",
+    "avg_covered_charges",
+    "avg_medicare_payments",
+    "markup_ratio",
+    "peer_median",
+    "peer_n",
+    "peer_level",
+    "relative_excess",
+    "robust_z",
+    "confidence",
+    "flag_reason",
+    "flagged_peer",
+    "flagged_both",
 )
 
 #: Where the dashboard asset lives inside the package.
@@ -203,7 +217,7 @@ def create_app(
                 "GET /summary": "headline statistics + how often each guard fired",
                 "GET /peer-levels": "which rung of the peer hierarchy served each row",
                 "GET /outliers": "flagged claims ranked by practical significance "
-                                 "(?limit=&state=&min_excess=&agreed_only=)",
+                "(?limit=&state=&min_excess=&agreed_only=)",
                 "GET /providers/{provider_id}": "one hospital's billing profile",
                 "POST /score": "score a hypothetical claim against loaded peers",
                 "GET /distribution": "server-side histogram of one column, with flags per bucket",
@@ -248,9 +262,7 @@ def create_app(
         limit: Annotated[int, Query(ge=1, le=500)] = 25,
         state: Annotated[str | None, Query(min_length=2, max_length=2)] = None,
         min_excess: Annotated[float, Query(ge=0.0)] = 0.0,
-        agreed_only: Annotated[
-            bool, Query(description="only rows both detectors flagged")
-        ] = False,
+        agreed_only: Annotated[bool, Query(description="only rows both detectors flagged")] = False,
     ) -> list[dict[str, Any]]:
         """Peer-flagged claims, ranked by practical significance.
 
@@ -276,7 +288,7 @@ def create_app(
                    markup_ratio, peer_median, peer_n, peer_level, relative_excess,
                    robust_z, confidence, flag_reason, flagged_peer, flagged_both
             FROM {FINAL_VIEW}
-            WHERE {' AND '.join(predicates)}
+            WHERE {" AND ".join(predicates)}
             ORDER BY relative_excess DESC
             LIMIT ?
         """
@@ -448,7 +460,6 @@ def create_app(
             reason=f"{reason_code}: {detail}",
         )
 
-
     @application.get(
         "/distribution",
         response_model=DistributionResponse,
@@ -464,8 +475,10 @@ def create_app(
         bins: Annotated[int, Query(ge=5, le=100)] = 40,
         log: Annotated[
             bool,
-            Query(description="bin on a natural-log scale; ignored for columns where "
-                  "it is not meaningful"),
+            Query(
+                description="bin on a natural-log scale; ignored for columns where "
+                "it is not meaningful"
+            ),
         ] = True,
     ) -> dict[str, Any]:
         """Histogram of one column, with the flagged count per bucket.
@@ -561,9 +574,7 @@ def create_app(
             for i in range(bins)
         ]
         if use_log and rows_binned < rows_total:
-            note = (
-                f"{rows_total - rows_binned:,} non-positive row(s) excluded by the log transform"
-            )
+            note = f"{rows_total - rows_binned:,} non-positive row(s) excluded by the log transform"
 
         return {
             "column": column,
@@ -581,7 +592,6 @@ def create_app(
             "note": note,
         }
 
-
     @application.get("/reference", response_model=ReferenceData, tags=["analysis"])
     def reference(pipeline: PipelineDep) -> dict[str, Any]:
         """Every distinct DRG, HRR and state present in the loaded dataset.
@@ -591,15 +601,24 @@ def create_app(
         on page load would be three chances to be slow.
         """
         cursor = pipeline.cursor()
-        drgs = [r[0] for r in cursor.execute(
-            f"SELECT DISTINCT drg FROM {FINAL_VIEW} WHERE drg IS NOT NULL ORDER BY drg"
-        ).fetchall()]
-        hrrs = [r[0] for r in cursor.execute(
-            f"SELECT DISTINCT hrr FROM {FINAL_VIEW} WHERE hrr IS NOT NULL ORDER BY hrr"
-        ).fetchall()]
-        states = [r[0] for r in cursor.execute(
-            f"SELECT DISTINCT state FROM {FINAL_VIEW} WHERE state IS NOT NULL ORDER BY state"
-        ).fetchall()]
+        drgs = [
+            r[0]
+            for r in cursor.execute(
+                f"SELECT DISTINCT drg FROM {FINAL_VIEW} WHERE drg IS NOT NULL ORDER BY drg"
+            ).fetchall()
+        ]
+        hrrs = [
+            r[0]
+            for r in cursor.execute(
+                f"SELECT DISTINCT hrr FROM {FINAL_VIEW} WHERE hrr IS NOT NULL ORDER BY hrr"
+            ).fetchall()
+        ]
+        states = [
+            r[0]
+            for r in cursor.execute(
+                f"SELECT DISTINCT state FROM {FINAL_VIEW} WHERE state IS NOT NULL ORDER BY state"
+            ).fetchall()
+        ]
         return {
             "drgs": drgs,
             "hrrs": hrrs,

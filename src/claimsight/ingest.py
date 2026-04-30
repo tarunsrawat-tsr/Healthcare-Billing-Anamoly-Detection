@@ -167,17 +167,13 @@ def load_claims(
     return con, report
 
 
-def _build_report(
-    con: duckdb.DuckDBPyConnection, source: str, view: str
-) -> IngestReport:
+def _build_report(con: duckdb.DuckDBPyConnection, source: str, view: str) -> IngestReport:
     """Compute the data-quality report with a small number of set-based queries."""
     rows_read = con.sql(f"SELECT count(*) FROM {view}_raw").fetchone()[0]
     rows_usable = con.sql(f"SELECT count(*) FROM {view}").fetchone()[0]
 
     null_counts = {
-        name: con.sql(
-            f'SELECT count(*) FROM {view}_raw WHERE "{name}" IS NULL'
-        ).fetchone()[0]
+        name: con.sql(f'SELECT count(*) FROM {view}_raw WHERE "{name}" IS NULL').fetchone()[0]
         for name in schema.CANONICAL_NAMES
     }
 

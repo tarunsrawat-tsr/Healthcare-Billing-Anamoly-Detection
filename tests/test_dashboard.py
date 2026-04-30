@@ -124,9 +124,7 @@ class TestDashboardAsset:
         called |= {"health", "summary", "peer-levels", "reference"}  # literal calls in boot()
         # Template literals (providers/${id}) and query strings are reduced to
         # their first path segment, which is what has to exist as a route.
-        called_roots = {
-            url.removeprefix("./").split("/")[0].split("?")[0] for url in called
-        }
+        called_roots = {url.removeprefix("./").split("/")[0].split("?")[0] for url in called}
         route_roots = {
             route.path.strip("/").split("/")[0]
             for route in client.app.routes
@@ -305,13 +303,10 @@ class TestDashboardApiContract:
         # single words, API fields are snake_case.
         unknown = sorted(used - known)
         assert not unknown, (
-            f"dashboard reads fields no endpoint returns: {unknown}. "
-            f"Known fields: {sorted(known)}"
+            f"dashboard reads fields no endpoint returns: {unknown}. Known fields: {sorted(known)}"
         )
 
-    def test_the_dollar_columns_are_actually_in_the_response(
-        self, client: TestClient
-    ) -> None:
+    def test_the_dollar_columns_are_actually_in_the_response(self, client: TestClient) -> None:
         """The specific regression, asserted over HTTP rather than by inspection."""
         rows: list[dict[str, Any]] = client.get("/outliers?limit=5").json()
         if not rows:

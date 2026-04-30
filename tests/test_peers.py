@@ -104,10 +104,7 @@ class TestAgainstTheCommittedSample:
     """The sample is what CI actually runs on, so prove it behaves too."""
 
     SAMPLE = (
-        TINY_CLAIMS.parent.parent.parent
-        / "data"
-        / "sample"
-        / "cms_inpatient_fy2016_sample.csv"
+        TINY_CLAIMS.parent.parent.parent / "data" / "sample" / "cms_inpatient_fy2016_sample.csv"
     )
 
     @pytest.mark.skipif(not SAMPLE.exists(), reason="committed sample not present")

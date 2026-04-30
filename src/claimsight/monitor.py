@@ -173,8 +173,7 @@ def distribution_profile(
     available = {
         row[0]
         for row in con.sql(
-            "SELECT column_name FROM information_schema.columns "
-            f"WHERE table_name = '{view}'"
+            f"SELECT column_name FROM information_schema.columns WHERE table_name = '{view}'"
         ).fetchall()
     }
     profile: dict[str, Any] = {"view": view, "bins": bins, "features": {}}
@@ -195,7 +194,7 @@ def distribution_profile(
             ],
             dtype=float,
         )
-        total = con.sql(f'SELECT count(*) FROM {view}').fetchone()[0]
+        total = con.sql(f"SELECT count(*) FROM {view}").fetchone()[0]
         null_rate = 1.0 - (len(values) / total) if total else 0.0
 
         if len(values) < bins:
@@ -279,9 +278,7 @@ def population_stability_index(
     else:
         expected_arr = np.asarray(expected, dtype=float)
         if expected_arr.size != n_bins:
-            raise ValueError(
-                f"expected {n_bins} baseline proportions, got {expected_arr.size}"
-            )
+            raise ValueError(f"expected {n_bins} baseline proportions, got {expected_arr.size}")
 
     if current_values.size == 0:
         # Nothing to compare: put all mass in the first bin so PSI is large and
@@ -289,9 +286,7 @@ def population_stability_index(
         actual = np.full(n_bins, EPSILON)
         actual[0] = 1.0 - EPSILON * (n_bins - 1)
     else:
-        counts, _ = np.histogram(current_values, bins=np.concatenate(
-            [[-np.inf], edges, [np.inf]]
-        ))
+        counts, _ = np.histogram(current_values, bins=np.concatenate([[-np.inf], edges, [np.inf]]))
         actual = counts / counts.sum()
 
     actual = np.clip(actual, EPSILON, None)
@@ -340,9 +335,7 @@ def compute_drift(
             dtype=float,
         )
         total = con.sql(f"SELECT count(*) FROM {view}").fetchone()[0]
-        current_median = con.sql(
-            f'SELECT median("{feature}") FROM {view}'
-        ).fetchone()[0]
+        current_median = con.sql(f'SELECT median("{feature}") FROM {view}').fetchone()[0]
 
         results.append(
             FeatureDrift(

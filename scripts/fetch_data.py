@@ -128,9 +128,7 @@ def validate(path: Path) -> dict[str, object]:
 
 def fetch(destination: Path, *, source_index: int | None = None) -> dict[str, object]:
     """Try each source in order until one yields a valid file."""
-    candidates = (
-        [SOURCES[source_index]] if source_index is not None else list(SOURCES)
-    )
+    candidates = [SOURCES[source_index]] if source_index is not None else list(SOURCES)
     destination.parent.mkdir(parents=True, exist_ok=True)
 
     with tempfile.TemporaryDirectory() as tmp:

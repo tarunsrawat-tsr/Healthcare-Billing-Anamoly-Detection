@@ -124,18 +124,21 @@ class ScoreRequest(BaseModel):
     #: against a peer median of 14.5), which correctly returned "within peer
     #: range" -- accurate, and a terrible demo. ``tests/test_docs.py`` asserts
     #: both that the example resolves against the data and that it flags.
-    model_config = ConfigDict(extra="forbid", json_schema_extra={
-        "examples": [
-            {
-                "drg": "440 - DISORDERS OF PANCREAS EXCEPT MALIGNANCY W/O CC/MCC",
-                "hrr": "TX - Dallas",
-                "state": "TX",
-                "total_discharges": 11,
-                "avg_covered_charges": 53062.36,
-                "avg_medicare_payments": 953.09,
-            }
-        ]
-    })
+    model_config = ConfigDict(
+        extra="forbid",
+        json_schema_extra={
+            "examples": [
+                {
+                    "drg": "440 - DISORDERS OF PANCREAS EXCEPT MALIGNANCY W/O CC/MCC",
+                    "hrr": "TX - Dallas",
+                    "state": "TX",
+                    "total_discharges": 11,
+                    "avg_covered_charges": 53062.36,
+                    "avg_medicare_payments": 953.09,
+                }
+            ]
+        },
+    )
 
     drg: DrgStr = Field(min_length=1, max_length=200)
     hrr: str = Field(min_length=1, max_length=200)

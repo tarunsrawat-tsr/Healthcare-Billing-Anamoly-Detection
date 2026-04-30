@@ -99,8 +99,8 @@ class TestOpenApiExample:
         body = sample_client.post("/score", json=example).json()
         assert body["would_flag"] is True, body
         assert body["reason"].startswith("high_markup")
-        assert body["markup_ratio"] > 50          # 53062.36 / 953.09
-        assert body["relative_excess"] > 5        # ~7.5x the peer median
+        assert body["markup_ratio"] > 50  # 53062.36 / 953.09
+        assert body["relative_excess"] > 5  # ~7.5x the peer median
         assert body["markup_ratio"] > body["peer_median"]
 
 
@@ -130,9 +130,7 @@ class TestReadmeClaims:
         schemas_path = REPO_ROOT / "src" / "claimsight" / "api" / "schemas.py"
         assert identifier not in schemas_path.read_text()
 
-    def test_drg_codes_quoted_in_readme_exist_in_the_sample(
-        self, all_drg_codes: set[str]
-    ) -> None:
+    def test_drg_codes_quoted_in_readme_exist_in_the_sample(self, all_drg_codes: set[str]) -> None:
         """Any ``NNN - ...`` DRG quoted in the README must be a real DRG code."""
         text = README.read_text()
         quoted = set(re.findall(r"\b(\d{3}) - [A-Z][A-Za-z0-9 &,/'\.\-()]*", text))
@@ -159,11 +157,11 @@ class TestFixtureIntegrity:
 
     def test_fixture_preserves_the_dirty_data_traps(self) -> None:
         text = self.FIXTURE.read_text()
-        assert '"1,134"' in text          # thousands separator in a count
-        assert "010033" in text           # zero-padded provider id
-        assert "02115" in text            # zero-padded ZIP
-        assert "$1,016,806.46" in text    # currency-formatted money
-        assert ",N/A" in text             # corrupt value that must be rejected
+        assert '"1,134"' in text  # thousands separator in a count
+        assert "010033" in text  # zero-padded provider id
+        assert "02115" in text  # zero-padded ZIP
+        assert "$1,016,806.46" in text  # currency-formatted money
+        assert ",N/A" in text  # corrupt value that must be rejected
 
 
 class TestReadmeTestCounts:
