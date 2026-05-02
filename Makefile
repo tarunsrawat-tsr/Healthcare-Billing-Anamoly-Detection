@@ -5,13 +5,14 @@
 
 PYTHON      ?= python3
 PIP         := $(PYTHON) -m pip
+CXX         ?= g++
 DATA_FULL   := data/raw/cms_inpatient_fy2016.csv
 DATA_SAMPLE := data/sample/cms_inpatient_fy2016_sample.csv
 REPORT_JSON := artifacts/report.json
 DRIFT_JSON  := artifacts/drift.json
 
 .DEFAULT_GOAL := help
-.PHONY: help install install-dev lint format typecheck test coverage \
+.PHONY: help install install-dev lint format typecheck test coverage templates \
         data sample report save runs drift fairness serve docker-build \
         docker-run clean
 
@@ -37,6 +38,13 @@ test:  ## Run the test suite
 
 coverage:  ## Run tests with a coverage report
 	$(PYTHON) -m pytest --cov=claimsight --cov-report=term-missing
+
+templates:  ## Compile + self-test the interview C++ templates in prep/
+	@command -v $(CXX) >/dev/null || { echo "no C++ compiler ($(CXX)) found"; exit 1; }
+	@tmp=$$(mktemp -d); \
+	 $(CXX) -std=c++17 -O2 -Wall -Wextra -o $$tmp/templates.bin prep/cpp-templates.cpp \
+	   && $$tmp/templates.bin; \
+	 status=$$?; rm -rf $$tmp; exit $$status
 
 data:  ## Fetch the full 34 MB CMS file (not committed)
 	$(PYTHON) scripts/fetch_data.py --destination $(DATA_FULL)

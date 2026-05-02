@@ -42,7 +42,7 @@ HTTP API.
   the Population Stability Index of seven features against a stored baseline.
   [Its first run caught a limitation of my own demo
   dataset.](#drift-monitoring-and-what-it-caught-on-run-one)
-- **Tested.** 287 tests, including hand-built fixtures that encode every dirty-data
+- **Tested.** 297 tests, including hand-built fixtures that encode every dirty-data
   trap in the source file, a test asserting every branch of the flagging `CASE`
   chain is reachable (after one was found to be dead code), and tests that assert
   the documented API example resolves against real data.
@@ -88,7 +88,8 @@ HTTP API.
 
 ```bash
 make install-dev        # runtime + dev deps
-make test               # 287 tests, hermetic (uses the committed sample)
+make test               # 297 tests, hermetic (uses the committed sample)
+make templates          # compile + self-test the C++ reference in prep/
 make report             # full pipeline -> anomaly report on stdout + JSON
 make fairness           # flag-rate audit across hospital size bands and states
 make serve              # API + dashboard on :8000  (/dashboard, /docs)
@@ -588,7 +589,7 @@ Python ≥ 3.10. Core dependencies: DuckDB, pandas, NumPy, scikit-learn, FastAPI
 Pydantic v2, Typer, Rich. **No GPU required** — the entire pipeline runs on 2 CPU
 cores in about 8 seconds.
 
-**287 tests, ~1 min, hermetic** (no network, no full dataset, no GPU). They run
+**297 tests, ~1 min, hermetic** (no network, no full dataset, no GPU). They run
 against a hand-built 18-row fixture and pin the things that fail silently:
 
 | Suite | Tests | What it protects |
@@ -604,6 +605,7 @@ against a hand-built 18-row fixture and pin the things that fail silently:
 | `test_cli` | 24 | commands print real numbers; `drift` exit codes 0 / 1 / 2 |
 | `test_dashboard` | 46 | the asset is self-contained, only calls routes that exist, and reads no field the API does not return |
 | `test_docs` | 12 | documented examples resolve against real data; the test counts quoted above match the live collection |
+| `test_prep` | 10 | the C++ reference in `prep/` compiles warning-free at `-O0`/`-O2` and passes its own asserts; every section the docs cross-reference exists |
 
 Those counts are asserted against the live collection by `test_docs.py`, so a stale
 number here fails the build rather than quietly embarrassing anyone.
