@@ -1,4 +1,4 @@
-# ClaimSight
+# Healthcare Billing Anomaly Detection
 
 A pipeline that flags unusual hospital billing patterns in CMS Medicare data.
 
